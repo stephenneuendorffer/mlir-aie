@@ -28,10 +28,58 @@ import aie.dialects.func as func
 
 import ast, inspect
 
+import astroid
+import astypes
+
+node = astroid.extract_node('1 + 2.3')
+t = astypes.get_type(node)
+print(t.annotation)  # 'float'
+
+from collections import defaultdict
+import aie.extras.types as T
+
+_ast_type_to_mlir_type = defaultdict(
+    lambda: None,
+    {
+        # Signed integer types
+        "int": T.i32,
+        "float": T.f32,
+    }
+)
+
+def to_mlir_type(x):
+    mlir_type = _ast_type_to_mlir_type[x]
+    if mlir_type:
+        return mlir_type()
+    else:
+        raise AttributeError(
+            f"Failed to map ast type to mlir python type: {str(x)}"
+        )
+
+# Add | Sub | Mult | MatMult | Div | Mod | Pow | LShift
+#                  | RShift | BitOr | BitXor | BitAnd | FloorDiv
+
+class IntegerOpEncoder(ast.NodeVisitor):
+    def visit_Add(self, node):
+        return arith.AddIOp
+
+class FloatOpEncoder(ast.NodeVisitor):
+    def visit_Add(self, node):
+        return arith.AddFOp
+
+def get_mlir_BinOp(op, type):
+    if type == "int":
+        return IntegerOpEncoder().visit(op)
+    elif type == "float":
+        return FloatOpEncoder().visit(op)
+    else:
+        raise Exception("Unknown binop type")
+
 class CodeGenerator(ast.NodeVisitor):
-    def __init__(self):
+    def __init__(self, typetree):
         self.indent = ""
         self.environment = {}
+        self.typetree = typetree
 
     def generic_visit(self, node):
         print(self.indent, node)
@@ -43,10 +91,32 @@ class CodeGenerator(ast.NodeVisitor):
             ast.NodeVisitor.visit(self, child)        
 
     def visit_FunctionDef(self, node):
-        # FIXME: Correct signature
-        foo = func.FuncOp("foo", ([], [IntegerType.get_signless(32)]))
+        print(node, astypes.get_type(astypes.find_node(self.typetree, node)))
+
+        # Walk the arguments and find their type annotations
+        argtypes = []
+        argnames = []
+        for arg in node.args.args:
+            print(arg, astypes.get_type(astypes.find_node(self.typetree, arg)), to_mlir_type(arg.annotation.id))
+            argtypes.append(to_mlir_type(arg.annotation.id))
+            argnames.append(arg.arg)
+
+        # Walk the return operations and infer their types.  hopefully they are all the same.
+        returntype = None
+        for opnode in node.body:
+            if isinstance(opnode, ast.Return):
+                print(opnode, astypes.get_type(astypes.find_node(self.typetree, opnode.value)))
+                returntype = to_mlir_type(astypes.get_type(astypes.find_node(self.typetree, opnode.value))._name)
+
+        print(returntype)
+        foo = func.FuncOp("foo", (argtypes, [returntype]))
+
         #foo.sym_visibility = StringAttr.get("private")
         entry_block = foo.add_entry_block()
+        inner_args = entry_block.arguments
+        for (i, arg) in enumerate(argnames):
+            self.environment[arg] = inner_args[i]
+
         with InsertionPoint(entry_block):
             # Traverse all the sub-nodes
             for child in node.body:
@@ -65,8 +135,18 @@ class CodeGenerator(ast.NodeVisitor):
     def visit_BinOp(self, node):
         left = self.visit(node.left)
         right = self.visit(node.right)
-        return arith.AddIOp(left, right) # FIXME: support all the things
+        lefttype = astypes.get_type(astypes.find_node(self.typetree, node.left))
+        righttype = astypes.get_type(astypes.find_node(self.typetree, node.right))
+        print(lefttype)
+        print(righttype)
 
+        # FIXME: handle promotion
+        if lefttype._name != righttype._name:
+            raise AttributeError(
+                f"BinOp types don't match: {lefttype._name} and {righttype._name} in '{ast.unparse(node)}'"
+            )
+        return get_mlir_BinOp(node.op, lefttype._name)
+        
     def visit_Name(self, node):
         if not isinstance(node.ctx, ast.Load):
             print("Unsupported expression name context type %s" %
@@ -96,39 +176,45 @@ class CodeGenerator(ast.NodeVisitor):
     def visit_Constant(self, node):
         return arith_extras.constant(node.value)
 
-def test_fn():
-    acc = 0
+def test_fn(x:float):
+    acc = 0.0
     for i in range(5):
-        acc = acc + i
+        acc = acc + x
     return acc
 
+
 with mlir_mod_ctx() as ctx:
-    generator = CodeGenerator()
     tree = ast.parse(inspect.getsource(test_fn))
+    # node = astypes.find_node(tree, tree)
+    # node_type = astypes.get_node(node)
     print(ast.dump(tree, indent=4))
+    typetree = astroid.parse(inspect.getsource(test_fn))
+    # print(next(tree.infer())) #.annotation)
+    # print(ast.dump(tree, indent=4))
+
+    generator = CodeGenerator(typetree)
     generator.visit(tree)
-    print(ctx.module)
     res = ctx.module.operation.verify()
     if res == True:
         print(ctx.module)
     else:
         print(res)
 
-with mlir_mod_ctx() as ctx:
-    @device(AIEDevice.npu2_1col)
-    def device_body():
-        @core(tile(0, 2))
-        def mlir_test_fn():
-            acc = arith.ConstantOp(infer_mlir_type(0), 0)
-            for j in range_(5, iter_args=[acc], insert_yield=False):
-                acc = j[1] + j[0]
-                scf.yield_([acc])
-            return 
-    res = ctx.module.operation.verify()
-    if res == True:
-        print(ctx.module)
-    else:
-        print(res)
+# with mlir_mod_ctx() as ctx:
+#     @device(AIEDevice.npu2_1col)
+#     def device_body():
+#         @core(tile(0, 2))
+#         def mlir_test_fn():
+#             acc = arith.ConstantOp(infer_mlir_type(0), 0)
+#             for j in range_(5, iter_args=[acc], insert_yield=False):
+#                 acc = j[1] + j[0]
+#                 scf.yield_([acc])
+#             return 
+#     res = ctx.module.operation.verify()
+#     if res == True:
+#         print(ctx.module)
+#     else:
+#         print(res)
 
 sys.exit(0)
 
