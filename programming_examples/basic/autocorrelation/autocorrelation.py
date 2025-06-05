@@ -75,6 +75,7 @@ def get_mlir_BinOp(op, type):
     else:
         raise Exception("Unknown binop type")
 
+
 class CodeGenerator(ast.NodeVisitor):
     def __init__(self, typetree):
         self.indent = ""
@@ -154,8 +155,19 @@ class CodeGenerator(ast.NodeVisitor):
         
         return self.environment[node.id]
 
+    # Given 'iter' node of a For loop, return a (lb, ub, step) triple
+    def _get_for_range(self, iter_node):
+        args = iter_node.args
+        if isinstance(iter_node, ast.Call) and iter_node.func.id == "range":
+            if len(args) == 1:
+                return (arith_extras.constant(0), self.visit(args[0]), arith_extras.constant(1))
+            elif len(args) == 2:
+                return (self.visit(args[0]), self.visit(args[1]), arith_extras.constant(1))
+            else:
+                return (self.visit(args[0]), self.visit(args[1]), self.visit(args[2]))
+
     def visit_For(self, node):
-        (lb, ub, step) = (arith_extras.constant(0),arith_extras.constant(5),arith_extras.constant(1)) # FIXME
+        (lb, ub, step) = self._get_for_range(node.iter)
         iter_args = ["acc"] # FIXME: Walk the loop to figure this out.
         liveins = [self.environment[arg] for arg in iter_args]
         loop = scf.ForOp(lb, ub, step, liveins)
