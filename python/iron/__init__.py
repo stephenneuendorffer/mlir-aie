@@ -1,5 +1,6 @@
 from .globalbuffer import GlobalBuffer
 from .kernel import ExternalFunction, Kernel
+from .pykernel import PyKernel
 from .localbuffer import LocalBuffer
 from .program import Program
 from .worker import Worker, WorkerRuntimeBarrier

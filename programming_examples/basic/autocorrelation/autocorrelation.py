@@ -10,8 +10,10 @@ import argparse
 import sys
 import numpy as np
 import aie.iron as iron
+from numpy.typing import *
+from typing import *
 
-from aie.iron import ObjectFifo, Program, Runtime, Worker
+from aie.iron import ObjectFifo, Program, Runtime, Worker, PyKernel
 from aie.iron.placers import SequentialPlacer
 from aie.iron.device import NPU1Col1, NPU2Col1
 from aie.iron.controlflow import range_
@@ -24,59 +26,27 @@ from aie.dialects import memref, arith
 import aie.extras.dialects.ext.arith as arith_extras
 import aie.extras.dialects.ext.scf as scf
 from aie.helpers.util import np_dtype_to_mlir_type, infer_mlir_type
+from aie.extras.runtime.passes import Pipeline
+from aie.passmanager import PassManager
+from aie.execution_engine import ExecutionEngine
 import aie.dialects.func as func
+import aie.dialects.tensor as tensor
+import aie.dialects.index as index
+import aie.ir
 
 import ast, inspect
+import mypy.parse as mp
 
 import astroid
 import astypes
 
-node = astroid.extract_node('1 + 2.3')
-t = astypes.get_type(node)
-print(t.annotation)  # 'float'
-
-from collections import defaultdict
-import aie.extras.types as T
-
-_ast_type_to_mlir_type = defaultdict(
-    lambda: None,
-    {
-        # Signed integer types
-        "int": T.i32,
-        "float": T.f32,
-    }
-)
-
-def to_mlir_type(x):
-    mlir_type = _ast_type_to_mlir_type[x]
-    if mlir_type:
-        return mlir_type()
-    else:
-        raise AttributeError(
-            f"Failed to map ast type to mlir python type: {str(x)}"
-        )
-
-# Add | Sub | Mult | MatMult | Div | Mod | Pow | LShift
-#                  | RShift | BitOr | BitXor | BitAnd | FloorDiv
-
-class IntegerOpEncoder(ast.NodeVisitor):
-    def visit_Add(self, node):
-        return arith.AddIOp
-
-class FloatOpEncoder(ast.NodeVisitor):
-    def visit_Add(self, node):
-        return arith.AddFOp
-
-def get_mlir_BinOp(op, type):
-    if type == "int":
-        return IntegerOpEncoder().visit(op)
-    elif type == "float":
-        return FloatOpEncoder().visit(op)
-    else:
-        raise Exception("Unknown binop type")
+import logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.DEBUG)
 
 
-class CodeGenerator(ast.NodeVisitor):
+
+class TypePrinter(ast.NodeVisitor):
     def __init__(self, typetree):
         self.indent = ""
         self.environment = {}
@@ -86,155 +56,131 @@ class CodeGenerator(ast.NodeVisitor):
         print(self.indent, node)
         raise Exception("Unsupported python node", node)
         
+    def visit_Call(self, node):
+        print(self.indent, node)
+
+    def visit_For(self, node):
+        print("for")
+        itertype = astypes.get_type(astypes.find_node(self.typetree, node.iter))
+        print(ast.dump(node.iter), list(astypes.find_node(self.typetree, node.iter).infer()), itertype)
+        # print(list(astypes.find_node(self.typetree, node.target).infer()))
+        # Traverse all the sub-nodes
+        for child in node.body:
+            ast.NodeVisitor.visit(self, child) 
+
     def visit_Module(self, node):
         # Traverse all the sub-nodes
         for child in node.body:
-            ast.NodeVisitor.visit(self, child)        
+            ast.NodeVisitor.visit(self, child)
 
     def visit_FunctionDef(self, node):
-        print(node, astypes.get_type(astypes.find_node(self.typetree, node)))
+        print(node, astypes.find_node(self.typetree, node).args, astypes.get_type(astypes.find_node(self.typetree, node)))
 
         # Walk the arguments and find their type annotations
         argtypes = []
         argnames = []
         for arg in node.args.args:
-            print(arg, astypes.get_type(astypes.find_node(self.typetree, arg)), to_mlir_type(arg.annotation.id))
-            argtypes.append(to_mlir_type(arg.annotation.id))
-            argnames.append(arg.arg)
+            # print(arg, astypes.find_node(self.typetree, arg), astypes.get_type(astypes.find_node(self.typetree, arg)))
+            argtypes.append((arg.arg, arg.annotation))
+            # argnames.append(arg.arg)
 
         # Walk the return operations and infer their types.  hopefully they are all the same.
         returntype = None
         for opnode in node.body:
             if isinstance(opnode, ast.Return):
-                print(opnode, astypes.get_type(astypes.find_node(self.typetree, opnode.value)))
-                returntype = to_mlir_type(astypes.get_type(astypes.find_node(self.typetree, opnode.value))._name)
+                if(opnode.value is not None):
+                    # print(astypes.find_node(self.typetree, opnode))
+                    inferred_type = astypes.get_type(astypes.find_node(self.typetree, opnode.value))
+                    print(opnode, inferred_type)
+                    if inferred_type:
+                        returntype = inferred_type._name
+                    else:
+                        returntype = None
 
-        print(returntype)
-        foo = func.FuncOp("foo", (argtypes, [returntype]))
+        print(node.name, argtypes, returntype)
 
-        #foo.sym_visibility = StringAttr.get("private")
-        entry_block = foo.add_entry_block()
-        inner_args = entry_block.arguments
-        for (i, arg) in enumerate(argnames):
-            self.environment[arg] = inner_args[i]
-
-        with InsertionPoint(entry_block):
-            # Traverse all the sub-nodes
-            for child in node.body:
-                ast.NodeVisitor.visit(self, child)
+        # Traverse all the sub-nodes
+        for child in node.body:
+            ast.NodeVisitor.visit(self, child)
 
     def visit_Assign(self, node):
         value = self.visit(node.value)
+        righttype = astypes.get_type(astypes.find_node(self.typetree, node.value))
         for target in node.targets:
             #self.fctx.update_loc(target)
             if not isinstance(target.ctx, ast.Store):
                 # TODO: Del, AugStore, etc
                 print("Unsupported assignment context type %s" %
                                 target.ctx.__class__.__name__)
-            self.environment[target.id] = value
+            inferred_type = astypes.get_type(astypes.find_node(self.typetree, target))
+            print("Assign", ast.unparse(target), inferred_type, "=", righttype)
+            # self.environment[target.id] = value
 
     def visit_BinOp(self, node):
         left = self.visit(node.left)
         right = self.visit(node.right)
         lefttype = astypes.get_type(astypes.find_node(self.typetree, node.left))
         righttype = astypes.get_type(astypes.find_node(self.typetree, node.right))
-        print(lefttype)
-        print(righttype)
-
-        # FIXME: handle promotion
-        if lefttype._name != righttype._name:
-            raise AttributeError(
-                f"BinOp types don't match: {lefttype._name} and {righttype._name} in '{ast.unparse(node)}'"
-            )
-        return get_mlir_BinOp(node.op, lefttype._name)
+        mytype = astypes.get_type(astypes.find_node(self.typetree, node))
+        print("BinOp", mytype._name, "=", lefttype._name, righttype._name)
         
     def visit_Name(self, node):
         if not isinstance(node.ctx, ast.Load):
             print("Unsupported expression name context type %s" %
                             node.ctx.__class__.__name__)
         
-        return self.environment[node.id]
+        # return self.environment[node.id]
 
-    # Given 'iter' node of a For loop, return a (lb, ub, step) triple
-    def _get_for_range(self, iter_node):
-        args = iter_node.args
-        if isinstance(iter_node, ast.Call) and iter_node.func.id == "range":
-            if len(args) == 1:
-                return (arith_extras.constant(0), self.visit(args[0]), arith_extras.constant(1))
-            elif len(args) == 2:
-                return (self.visit(args[0]), self.visit(args[1]), arith_extras.constant(1))
-            else:
-                return (self.visit(args[0]), self.visit(args[1]), self.visit(args[2]))
-
-    def visit_For(self, node):
-        (lb, ub, step) = self._get_for_range(node.iter)
-        iter_args = ["acc"] # FIXME: Walk the loop to figure this out.
-        liveins = [self.environment[arg] for arg in iter_args]
-        loop = scf.ForOp(lb, ub, step, liveins)
-        with InsertionPoint(loop.body):
-            self.environment[node.target.id] = loop.induction_variable
-            for child in node.body:
-                ast.NodeVisitor.visit(self, child)
-
-            scf.YieldOp(loop.inner_iter_args)
-        for (i, arg) in enumerate(iter_args):
-            self.environment[arg] = loop.results[i]
-        return loop
 
     def visit_Return(self, node):
-        # add a terminator
-        func.ReturnOp([self.visit(node.value)])
+        None
 
     def visit_Constant(self, node):
-        return arith_extras.constant(node.value)
+        None
 
-def test_fn(x:float):
-    acc = 0.0
-    for i in range(5):
+def process_core_function(fn):
+        tree = ast.parse(inspect.getsource(fn))
+        typetree = astroid.parse(inspect.getsource(fn))
+        node = tree.body[0]
+        print(ast.dump(node, indent=4))
+        print(node, astypes.get_type(astypes.find_node(typetree.body[0], node)))            
+
+        generator = TypePrinter(typetree)
+        generator.visit(tree.body[0])
+
+def test_fn(x:int):
+    acc = 1
+    for i in [0,1,2,3,4]: #range(5):
         acc = acc + x
     return acc
 
+def test_fn2(x:int):
+    r = np.ndarray((64, 64), float)
+    r[0,0] = 1.0
+    return r
 
-with mlir_mod_ctx() as ctx:
-    tree = ast.parse(inspect.getsource(test_fn))
-    # node = astypes.find_node(tree, tree)
-    # node_type = astypes.get_node(node)
-    print(ast.dump(tree, indent=4))
-    typetree = astroid.parse(inspect.getsource(test_fn))
-    # print(next(tree.infer())) #.annotation)
-    # print(ast.dump(tree, indent=4))
+def test_fn3(x:int):
+    return np.ndarray((x, x), float)
 
-    generator = CodeGenerator(typetree)
-    generator.visit(tree)
-    res = ctx.module.operation.verify()
-    if res == True:
-        print(ctx.module)
-    else:
-        print(res)
+def test_fn4(r:array[int]):
+    acc = 1
+    for i in range(0,10):
+        r[0,i] = i*2
+    return r
+    
+# process_core_function(test_fn)
+# process_core_function(test_fn2)
+# process_core_function(test_fn3)
+# process_core_function(test_fn4)
+    # def process_numpy_array(data: NDArray[np.int_]) -> NDArray[np.float_]:
+    # return data * 2.5
 
-# with mlir_mod_ctx() as ctx:
-#     @device(AIEDevice.npu2_1col)
-#     def device_body():
-#         @core(tile(0, 2))
-#         def mlir_test_fn():
-#             acc = arith.ConstantOp(infer_mlir_type(0), 0)
-#             for j in range_(5, iter_args=[acc], insert_yield=False):
-#                 acc = j[1] + j[0]
-#                 scf.yield_([acc])
-#             return 
-#     res = ctx.module.operation.verify()
-#     if res == True:
-#         print(ctx.module)
-#     else:
-#         print(res)
-
-sys.exit(0)
 
 @iron.jit(is_placed=False)
 def vector_vector_add(input0, params, output):
     num_elements = np.size(input0)
     offset = params[0]
-    n = 1024
+    n = 64
     if num_elements % n != 0:
         raise ValueError(
             f"Number of elements ({num_elements}) must be a multiple of {n}."
@@ -243,36 +189,40 @@ def vector_vector_add(input0, params, output):
     dtype = input0.dtype
 
     # Define tensor types
-    tensor_ty = np.ndarray[(num_elements,), np.dtype[dtype]]
-    tile_ty = np.ndarray[(n,), np.dtype[dtype]]
+    tensor_ty = np.ndarray[(1, num_elements,), np.dtype[dtype]]
+    tile_ty = np.ndarray[(1, n,), np.dtype[dtype]]
 
     # AIE-array data movement with object fifos
     of_in1 = ObjectFifo(tile_ty, name="in1")
     of_params = ObjectFifo(tile_ty, name="in2")
     of_out = ObjectFifo(tile_ty, name="out")
 
+    test_kernel = PyKernel(test_fn4)
+
     # Define a task that will run on a compute tile
-    def core_body(of_in1, of_params, of_out):
+    def core_body(of_in1, of_params, of_out, kernel):
         elem_in1 = of_in1.acquire(1)
         elem_params = of_params.acquire(1)
         elem_out = of_out.acquire(1)
-        for i in range_(num_elements):
-            zero = arith.ConstantOp(infer_mlir_type(0), 0)
-            elem_out[i] = arith.Scalar(zero)
+        #elem_out[0] = 
+        kernel(elem_out)
+        # for i in range_(num_elements):
+        #     zero = arith.ConstantOp(infer_mlir_type(0), 0)
+        #     elem_out[i] = arith_extras.Scalar(zero)
             
-        for i in range_(16):
-            acc = arith.ConstantOp(infer_mlir_type(0), 0)
-            for j in range_(num_elements, iter_args=[acc], insert_yield=False):
-                acc = j[1] + elem_in1[i+j[0]] * elem_in1[j[0]]
-                scf.yield_([acc])
-            elem_out[i] = j[2]
-            # arith.index_cast(i, to=np_dtype_to_mlir_type(dtype))
+        # for i in range_(16):
+        #     acc = arith.ConstantOp(infer_mlir_type(0), 0)
+        #     for j in range_(num_elements, iter_args=[acc], insert_yield=False):
+        #         acc = j[1] + elem_in1[i+j[0]] * elem_in1[j[0]]
+        #         scf.yield_([acc])
+        #     elem_out[i] = j[2]
+        #     # arith.index_cast(i, to=np_dtype_to_mlir_type(dtype))
         of_in1.release(1)
         of_params.release(1)
         of_out.release(1)
 
     # Create a worker to run the task on a compute tile
-    worker = Worker(core_body, fn_args=[of_in1.cons(), of_params.cons(), of_out.prod()])
+    worker = Worker(core_body, fn_args=[of_in1.cons(), of_params.cons(), of_out.prod(), test_kernel])
 
     # Runtime operations to move data to/from the AIE-array
     rt = Runtime()
