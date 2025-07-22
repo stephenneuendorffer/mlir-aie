@@ -125,7 +125,8 @@ bool IntervalReuse::potentialReuse(
     vector::TransferReadOp readOp, AffineExpr invariantBase,
     mlir::DenseMap<Block *, SmallVector<Operation *, 8>>
         &blockToEnclosingLoops) {
-  return sameMemRef(readOp.getBase()) && sameInvariantIndices(invariantBase) &&
+  return sameMemRef(readOp.getBase()) &&
+         sameInvariantIndices(invariantBase) &&
          sameEnclosingLoops(readOp, blockToEnclosingLoops);
 }
 
