@@ -89,8 +89,10 @@ LOWER_TO_LLVM_PIPELINE = (
     .arith_expand()
     .convert_arith_to_llvm()
     .finalize_memref_to_llvm()
-    .convert_func_to_llvm(use_bare_ptr_memref_call_conv=True)
+    .convert_func_to_llvm(use_bare_ptr_memref_call_conv=False)
     .convert_cf_to_llvm()
+    .canonicalize()
+    .inline()
     .canonicalize()
     .cse()
 )
@@ -411,7 +413,10 @@ def downgrade_ir_for_chess(llvmir_chesslinked):
 
 
 def downgrade_ir_for_peano(llvmir):
-    llvmir = llvmir.replace("getelementptr inbounds nuw", "getelementptr inbounds")
+    llvmir = (
+            llvmir.replace("getelementptr inbounds nuw", "getelementptr inbounds")
+                .replace("captures(none)", "nocapture")
+    )
     return llvmir
 
 
