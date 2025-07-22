@@ -21,6 +21,7 @@ include "mlir/IR/SymbolInterfaces.td"
 include "mlir/Interfaces/CallInterfaces.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+include "mlir/Interfaces/CallInterfaces.td"
 
 class AIE_Op<string mnemonic, list<Trait> traits = []> :
     Op<AIE_Dialect, mnemonic, traits>;
@@ -306,8 +307,10 @@ def AIE_ShimDMAOp: AIE_Op<"shim_dma", [
   }];
 }
 
+// The fact that cores are 'callable' is an artifact of the way the call graph in MLIR works
+// Although the op is not really "Callable", we want to track calls *from* this region.
 def AIE_CoreOp: AIE_Op<"core", [
-    FlowEndPoint, IsCoreTile, TileElement,
+    FlowEndPoint, IsCoreTile, TileElement, CallableOpInterface, AutomaticAllocationScope,
     DeclareOpInterfaceMethods<InferTypeOpInterface>
   ]>, Results<(outs Index)> {
   let arguments = (
@@ -361,6 +364,17 @@ def AIE_CoreOp: AIE_Op<"core", [
     bool isMemWest() { return ((rowIndex() % 2) == 0); };
     TileOp getTileOp();
     using ::xilinx::AIE::TileElement::Trait<CoreOp>::getAsmResultNames;
+    ::mlir::Region * getCallableRegion() { return &getBody(); }
+    // Functions below are part of CallableOpInterface, but should never be called, because
+    // nothing should call an aie.core op.
+    ::llvm::ArrayRef<::mlir::Type> getArgumentTypes() { return ::llvm::ArrayRef<::mlir::Type>(); }
+    ::llvm::ArrayRef<::mlir::Type> getResultTypes() { return ::llvm::ArrayRef<::mlir::Type>(); }
+    ::mlir::ArrayAttr getArgAttrsAttr() { return nullptr; }
+    ::mlir::ArrayAttr getResAttrsAttr() { return nullptr; }
+    void setArgAttrsAttr(::mlir::ArrayAttr) { }
+    void setResAttrsAttr(::mlir::ArrayAttr) { }
+    ::mlir::Attribute removeArgAttrsAttr() { return nullptr; }
+    ::mlir::Attribute removeResAttrsAttr() { return nullptr; }
   }];
 
   let builders = [
