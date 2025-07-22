@@ -339,7 +339,7 @@ void translatePacketFlows(DeviceOp targetOp, int &flowCount,
     bool done = false;
     do {
       for (auto packetRulesOp : currSwitchbox.getOps<PacketRulesOp>()) {
-        Port destPort;
+        Port destPort = {};
         for (auto masterSetOp : currSwitchbox.getOps<MasterSetOp>()) {
           for (Value amsel : masterSetOp.getAmsels()) {
             for (auto ruleOp :

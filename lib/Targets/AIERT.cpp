@@ -212,7 +212,7 @@ xilinx::AIE::AIERTControl::AIERTControl(const AIE::AIETargetModel &tm)
   size_t deviceCols = tm.columns() + partitionStartCol;
 
   // Don't put this in the target model, because it's XAIE specific.
-  unsigned char devGen;
+  unsigned char devGen = 0;
   switch (tm.getTargetArch()) {
   case AIEArch::AIE1: // probably unreachable.
     devGen = XAIE_DEV_GEN_AIE;
