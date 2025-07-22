@@ -26,8 +26,8 @@ struct AIEAssignRuntimeSequenceBDIDsPass
   BdIdGenerator &
   getGeneratorForTile(AIE::TileOp tile,
                       std::map<AIE::TileOp, BdIdGenerator> &gens) {
-    const AIETargetModel &targetModel =
-        tile->getParentOfType<AIE::DeviceOp>().getTargetModel();
+    auto parent = tile->getParentOfType<AIE::DeviceOp>();
+    const AIETargetModel &targetModel = parent.getTargetModel();
     auto genIt = gens.find(tile);
     if (genIt == gens.end()) {
       gens.insert(std::pair(

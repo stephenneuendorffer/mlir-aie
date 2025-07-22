@@ -109,7 +109,8 @@ void appendWrite32(std::vector<uint32_t> &instructions, NpuWrite32Op op) {
   auto col = op.getColumn();
   auto row = op.getRow();
   if (col && row) {
-    const AIETargetModel &tm = op->getParentOfType<DeviceOp>().getTargetModel();
+    auto parent = op->getParentOfType<DeviceOp>();
+    const AIETargetModel &tm = parent.getTargetModel();
     words[2] = ((*col & 0xff) << tm.getColumnShift()) |
                ((*row & 0xff) << tm.getRowShift()) | (words[2] & 0xFFFFF);
   }
@@ -134,7 +135,8 @@ void appendMaskWrite32(std::vector<uint32_t> &instructions,
   auto col = op.getColumn();
   auto row = op.getRow();
   if (col && row) {
-    const AIETargetModel &tm = op->getParentOfType<DeviceOp>().getTargetModel();
+    auto parent = op->getParentOfType<DeviceOp>();
+    const AIETargetModel &tm = parent.getTargetModel();
     words[2] = ((*col & 0xff) << tm.getColumnShift()) |
                ((*row & 0xff) << tm.getRowShift()) | (words[2] & 0xFFFFF);
   }
@@ -207,7 +209,8 @@ void appendBlockWrite(std::vector<uint32_t> &instructions, NpuBlockWriteOp op) {
   auto row = op.getRow();
   if (col && row) {
     words[1] = (*col & 0xff) | ((*row & 0xff) << 8);
-    const AIETargetModel &tm = op->getParentOfType<DeviceOp>().getTargetModel();
+    auto parent = op->getParentOfType<DeviceOp>();
+    const AIETargetModel &tm = parent.getTargetModel();
     words[2] = ((*col & 0xff) << tm.getColumnShift()) |
                ((*row & 0xff) << tm.getRowShift()) | (words[2] & 0xFFFFF);
   }
