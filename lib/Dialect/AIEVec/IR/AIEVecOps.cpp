@@ -1200,7 +1200,7 @@ ParseResult ShiftOp::parse(OpAsmParser &parser, OperationState &result) {
 // This verification function makes sure that the shuffle mode supports the
 // number and type of operands provided.
 LogicalResult ShuffleOp::verify() {
-  unsigned modeBitWidth;
+  unsigned modeBitWidth = 0;
   bool requireRhs = true;
   auto mode = getMode();
   switch (mode) {
@@ -1273,6 +1273,7 @@ LogicalResult ShuffleOp::verify() {
     modeBitWidth = 512u;
     break;
   }
+  assert(modeBitWidth > 0);
 
   // Verify number of operands
   if (requireRhs && !getRhs())
