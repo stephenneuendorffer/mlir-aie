@@ -1938,7 +1938,7 @@ static LogicalResult FoldDMAStartOp(DMAStartOp op, PatternRewriter &rewriter) {
     if (!areEquivalentBDs(*patternIt, uniquePattern[idx]))
       return failure();
     patternIt++;
-    idx = (++idx) % uniquePattern.size();
+    idx = (idx + 1) % uniquePattern.size();
   }
 
   // Repeating BD chains detected. Erasing repetitions.
