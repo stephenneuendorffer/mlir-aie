@@ -26,6 +26,11 @@
 #include <unicodeobject.h>
 #include <vector>
 
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+#endif
+
 using namespace mlir::python;
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -355,3 +360,7 @@ NB_MODULE(_aie, m) {
         return aieTargetModelGetRowShift(self.get());
       });
 }
+
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
