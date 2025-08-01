@@ -107,9 +107,13 @@ class NPUKernel:
                     f"Expected Tensor with .buffer_object(), got {type(tensor)}"
                 )
             kernel_args.append(tensor.buffer_object())
+            tensor.buffer_object().sync(xrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE)
 
         h = self.__kernel(opcode, self.__insts_buffer_bo, self.__n_insts, *kernel_args)
         r = h.wait()
+        for tensor in args:
+            tensor.buffer_object().sync(xrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE)
+
         if r != xrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
             raise NPUKernel_Error(f"Kernel returned {r}")
 
