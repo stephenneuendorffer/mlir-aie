@@ -607,7 +607,12 @@ class FlowRunner:
                 if not opts.unified:
                     file_core_llvmir_peanohacked = await self.peanohack(file_core_llvmir)
                     file_core_llvmir_stripped = corefile(self.tmpdirname, core, "stripped.ll")
-                    await self.do_call(task, [self.peano_opt_path, "--passes=default<O2>,strip", "-S", file_core_llvmir_peanohacked, "-o", file_core_llvmir_stripped])
+                    await self.do_call(task, [self.peano_opt_path, 
+                                              "-vectorize-slp=false",
+                                              "-vectorize-loops=false", 
+                                              "--passes=default<O2>,strip",
+                                              "-S", file_core_llvmir_peanohacked,
+                                              "-o", file_core_llvmir_stripped])
                     await self.do_call(task, [self.peano_llc_path, file_core_llvmir_stripped, "-O2", "--march=" + aie_target.lower(), "--function-sections", "--filetype=obj", "-o", file_core_obj])
                 else:
                     file_core_obj = self.unified_file_core_obj
@@ -1306,7 +1311,13 @@ class FlowRunner:
                 elif opts.compile:
                     file_llvmir_hacked = await self.peanohack(file_llvmir)
                     file_llvmir_opt = self.prepend_tmp("input.opt.ll")
-                    await self.do_call(progress_bar.task, [self.peano_opt_path, "--passes=default<O2>", "-inline-threshold=10", "-S", file_llvmir_hacked, "-o", file_llvmir_opt])
+                    await self.do_call(progress_bar.task, [self.peano_opt_path,
+                                                           "-vectorize-slp=false", 
+                                                           "-vectorize-loops=false",
+                                                            "--passes=default<O2>",
+                                                            "-inline-threshold=10",
+                                                            "-S", file_llvmir_hacked,
+                                                            "-o", file_llvmir_opt])
                     await self.do_call(progress_bar.task, [self.peano_llc_path, file_llvmir_opt, "-O2", "--march=" + aie_target.lower(), "--function-sections", "--filetype=obj", "-o", self.unified_file_core_obj])
             # fmt: on
 
