@@ -106,13 +106,13 @@ def test_sub(x:Sequence[int], o:Sequence[int]):
 
 def test_loop1(x:Sequence[int], o:Sequence[int]):
     acc = 0
-    for i in [0,1,2,3,4]:
-        o[0,i] = i*2
+    for v in [2,1,0]:
+        acc = acc + 1
+        o[0,acc] = v
 
 def test_loop2(x:Sequence[int], o:Sequence[int]):
     acc = 0
-    for i in [0,1,2,3,4]:
-        #range(0,10):
+    for i in range(0,10):
         o[0,i] = x[0,i] + i
 
 # def test_fn3(x:Sequence[int], o:Sequence[int]):
@@ -167,8 +167,8 @@ def main():
     # jit_test(test_div, "")
     jit_test(test_add, "tensor([5,0,0,...,0,0,0], device='npu')")
     jit_test(test_sub, "tensor([1,0,0,...,0,0,0], device='npu')")
-    jit_test(test_loop1, "tensor([0,0,0,...,0,0,0], device='npu')")
-    jit_test(test_loop2, "tensor([3,0,0,...,0,0,0], device='npu')")
+    jit_test(test_loop1, "tensor([2,1,0,...,0,0,0], device='npu')")
+    jit_test(test_loop2, "tensor([3,3,2,...,0,0,0], device='npu')")
 
 if __name__ == "__main__":
     main()
