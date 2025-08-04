@@ -33,6 +33,8 @@ import astypes
 from collections import defaultdict
 import aie.extras.types as T
 
+import logging
+
 _ast_type_to_mlir_type = defaultdict(
     lambda: None,
     {
@@ -62,7 +64,7 @@ def to_mlir_type(x):
         )
     # Handle Astroid types
     elif isinstance(x, astypes.Type):
-        if x._name == "ndarray" or x._name == "array":
+        if x._name == "ndarray" or x._name == "array" or x._name == "Sequence":
             element_type = to_mlir_type(x._args[0])
             return T.memref(ir.ShapedType.get_dynamic_size(), ir.ShapedType.get_dynamic_size(), element_type)
         else:
@@ -122,6 +124,7 @@ class CodeGenerator(ast.NodeVisitor):
 
             print("Unknown Type for", ast.dump(node))
             raise Exception("Type Inference failure", node) 
+        logging.debug(f"Type of {ast.dump(node)} is {result}")
         return result
 
     def generic_visit(self, node):
@@ -145,13 +148,10 @@ class CodeGenerator(ast.NodeVisitor):
         return [ast.NodeVisitor.visit(self, child) for child in node.body]
 
     def visit_FunctionDef(self, node):
-        # print(node, astypes.get_type(astypes.find_node(self.typetree, node)))
-
         # Walk the arguments and find their type annotations
         argtypes = []
         argnames = []
         for arg in node.args.args:
-            # print(arg, astypes.get_type(astypes.find_node(self.typetree, arg)), to_mlir_type(arg.annotation.id))
             argtypes.append(to_mlir_type(arg.annotation))
             argnames.append(arg.arg)
 
@@ -161,8 +161,7 @@ class CodeGenerator(ast.NodeVisitor):
             if isinstance(opnode, ast.Return):
                 if(opnode.value is not None):
                     # print(astypes.find_node(self.typetree, opnode))
-                    inferred_type = astypes.get_type(astypes.find_node(self.typetree, opnode.value))
-                    print(opnode, inferred_type)
+                    inferred_type = self.get_type(opnode.value)
                     returntype = to_mlir_type(inferred_type)
                     returntypes.append(returntype)
 
@@ -282,10 +281,6 @@ class CodeGenerator(ast.NodeVisitor):
                 ast.dump(iter_node))
 
     def visit_For(self, node):
-        # print("ForOp")
-        itertype = astypes.get_type(astypes.find_node(self.typetree, node.iter))
-        # print(ast.dump(node.iter), itertype)
-        # print(astypes.get_type(astypes.find_node(self.typetree, node)))
         iter_args = ["acc"] # FIXME: Walk the loop to figure this out.
         liveins = [self.environment[arg] for arg in iter_args]
         (loop, iv) = self._get_for_loop(node.iter, liveins)
