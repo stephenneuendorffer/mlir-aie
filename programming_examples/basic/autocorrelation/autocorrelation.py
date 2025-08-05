@@ -39,8 +39,8 @@ def autocorrelation(input:Sequence[int], output:Sequence[int], size:int):
     for i in range(0,size):
         acc = 0
         for j in range(0,size-i):
-            acc = acc + input[0,j] * input[0,i+j]
-        output[0,i] = acc
+            acc = acc + input[j] * input[i+j]
+        output[i] = acc
     return acc
     
 @iron.jit(is_placed=False)
@@ -56,8 +56,8 @@ def test_model(input0, params, output):
     dtype = input0.dtype
 
     # Define tensor types
-    tensor_ty = np.ndarray[(1, num_elements,), np.dtype[dtype]]
-    tile_ty = np.ndarray[(1, n,), np.dtype[dtype]]
+    tensor_ty = np.ndarray[(num_elements,), np.dtype[dtype]]
+    tile_ty = np.ndarray[(n,), np.dtype[dtype]]
 
     # AIE-array data movement with object fifos
     of_in1 = ObjectFifo(tile_ty, name="in1")
@@ -120,13 +120,13 @@ def main():
 
     # Construct two input random tensors and an output zeroed tensor
     # The three tensor are in memory accessible to the NPU
-    input0 = iron.randint(-20, 20, (1, args.num_elements,), dtype=np.int32, device="npu")
+    input0 = iron.randint(-20, 20, (args.num_elements,), dtype=np.int32, device="npu")
     params = iron.randint(0, 1, (16,), dtype=np.int32, device="npu")
 
     iron.set_current_device(device_map[args.device])
 
-    smoothed_input = input0[0][0:512] + input0[0][1:513] + input0[0][2:514]
-    smoothed_input = iron.tensor(np.reshape(smoothed_input, (1, 512)), dtype=np.int32)
+    smoothed_input = input0[0:512] + input0[1:513] + input0[2:514]
+    smoothed_input = iron.tensor(smoothed_input, dtype=np.int32)
     output = iron.zeros_like(smoothed_input)
 
     # JIT-compile the kernel then launches the kernel with the given arguments. Future calls
@@ -145,7 +145,7 @@ def main():
         print("-" * 34)
         count = input0.numel()
         for idx, (a, b, c) in enumerate(
-            zip(golden_output[0][:count], output[0][:count], smoothed_input[0][:count])
+            zip(golden_output[:count], output[:count], smoothed_input[:count])
         ):
             print(f"{idx:2}: {a} == {b}   {c}")
 

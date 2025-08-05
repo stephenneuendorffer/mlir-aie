@@ -50,15 +50,13 @@ def to_mlir_type(x):
         return T.i32()
     elif x == "float":
         return T.f32()
-    elif x == "ndarray" or x == "array" or x == "Sequence":
-        return T.memref(ir.ShapedType.get_dynamic_size(), ir.ShapedType.get_dynamic_size(), T.f32())
     # Handle AST nodes to deal with type annotations
     elif isinstance(x, ast.Name):
         return to_mlir_type(x.id)
     elif isinstance(x, ast.Subscript):
         element_type = to_mlir_type(x.slice)
         if x.value.id == "ndarray" or x.value.id == "array" or x.value.id == "Sequence":
-            return T.memref(ir.ShapedType.get_dynamic_size(), ir.ShapedType.get_dynamic_size(), element_type)
+            return T.memref(element_type)
         raise AttributeError(
             f"Failed to map ast type to mlir python type: {str(x)}"
         )
@@ -66,7 +64,7 @@ def to_mlir_type(x):
     elif isinstance(x, astypes.Type):
         if x._name == "ndarray" or x._name == "array" or x._name == "Sequence":
             element_type = to_mlir_type(x._args[0])
-            return T.memref(ir.ShapedType.get_dynamic_size(), ir.ShapedType.get_dynamic_size(), element_type)
+            return T.memref(element_type)
         else:
             return to_mlir_type(x._name)
     else:
@@ -186,11 +184,16 @@ class CodeGenerator(ast.NodeVisitor):
 
     def visit_Subscript(self, node):
         if isinstance(node.ctx, ast.Load):
-            value = self.visit(node.value)
+            mem_op = self.visit(node.value)
             indexes = self.visit(node.slice)
             # print(var, indexes)
-            args = [index.CastUOp(T.index(), x) for x in indexes]
-            return memref.load(value, args)
+            from collections.abc import Iterable
+            if not isinstance(indexes, Iterable):
+                indexes = [indexes]
+            args = [index.CastUOp(T.index(), x) for x in indexes]            
+            shape = [ir.ShapedType.get_dynamic_size() for x in indexes]
+            shaped_mem_op = memref.CastOp(T.memref(*shape, T.i32()), mem_op)
+            return memref.load(shaped_mem_op, args)
         else:
             # TODO: Del, AugStore, etc
             print("Unsupported assignment context type %s" %
@@ -209,11 +212,16 @@ class CodeGenerator(ast.NodeVisitor):
                                     target.ctx.__class__.__name__)
             elif isinstance(target, ast.Subscript):
                 if isinstance(target.ctx, ast.Store):
-                    var = self.visit(target.value)
+                    mem_op = self.visit(target.value)
                     indexes = self.visit(target.slice)
                     # print(var, indexes)
+                    from collections.abc import Iterable
+                    if not isinstance(indexes, Iterable):
+                        indexes = [indexes]
                     args = [index.CastUOp(T.index(), x) for x in indexes]
-                    memref.store(value, var, args)
+                    shape = [ir.ShapedType.get_dynamic_size() for x in indexes]
+                    shaped_mem_op = memref.CastOp(T.memref(*shape, T.i32()), mem_op)
+                    memref.store(value, shaped_mem_op, args)
                 else:
                     # TODO: Del, AugStore, etc
                     print("Unsupported assignment context type %s" %
@@ -310,18 +318,6 @@ class CodeGenerator(ast.NodeVisitor):
         return constant(node.value)
 
 def process_core_function(fn):
-    # options = mp.Options()
-    # mptree = mp.parse(inspect.getsource(fn), fnam="test", module="__main__", errors=mp.Errors(options), options=options)
-    # a = np.ndarray((2, 2), float) # type: np.typing.NDArray[numpy._typing._16Bit]
-    # # reveal_type(a)
-    # # reveal_type(np.ndarray((2, 2)))
-    # # reveal_type(np.ndarray((2, 2), float))
-    # # reveal_type(np.ndarray((2, 2), float).shape())
-    # # reveal_type(np.zeros((2, 2), dtype=float))
-    # # reveal_type(np.array(x**2 for x in range(10)))
-    # # reveal_type(np.float16())
-    # print(mptree)
-
     if isinstance(fn, str):
         source = fn
     else:
@@ -332,12 +328,8 @@ def process_core_function(fn):
     except Exception as e:
         print("parsing failed: ", source)
 
-    # print(ast.dump(tree, indent=4))
     typetree = astroid.parse(source)
-    # assert(tree.body[0].name == fn.__name__)
-
     generator = CodeGenerator(typetree)
-    # print(tree.body[0])
     result = None
     try:
         result = generator.visit(tree.body[0])
@@ -408,7 +400,7 @@ class PyKernel(Resolvable):
             self._op = process_core_function(self._name)
 
     def downcast_arg(self, x, t):
-        if isinstance(t, T.MemRefType):
+        if isinstance(t, T.MemRefType) or isinstance(t, T.UnrankedMemRefType):
             return memref.CastOp(t, x)
         else:
             return x
