@@ -377,6 +377,10 @@ def process_core_function(fn):
     
     #await self.do_call(task, ["aie-translate", "--mlir-to-llvmir", file_opt_core, "-o", file_core_llvmir])
 
+def get_mlir(fn):
+    with mlir_mod_ctx() as ctx:
+        return str(process_core_function(fn))
+
 class PyKernel(Resolvable):
     def __init__(
         self,
