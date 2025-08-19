@@ -77,29 +77,29 @@ def to_mlir_type(x):
 
 class IntegerOpEncoder(ast.NodeVisitor):
     def visit_Add(self, node):
-        return arith.AddIOp
+        return arith.addi
 
     def visit_Sub(self, node):
-        return arith.SubIOp
+        return arith.subi
 
     def visit_Mult(self, node):
-        return arith.MulIOp
+        return arith.muli
 
     def visit_Div(self, node):
-        return arith.DivIOp
+        return arith.divi
 
 class FloatOpEncoder(ast.NodeVisitor):
     def visit_Add(self, node):
-        return arith.AddFOp
+        return arith.addf
 
     def visit_Sub(self, node):
-        return arith.SubFOp
+        return arith.subf
 
     def visit_Mult(self, node):
-        return arith.MulFOp
+        return arith.mulf
 
     def visit_Div(self, node):
-        return arith.DivFOp
+        return arith.divf
 
 def get_mlir_BinOp(op, type):
     if type == "int":
@@ -182,54 +182,95 @@ class CodeGenerator(ast.NodeVisitor):
 
         return newfunc
 
+    def is_slice(self, node):
+        if isinstance(node, ast.Tuple):
+            for e in node.elts:
+                if isinstance(e, ast.Slice):
+                    return True
+        else:
+            if isinstance(node, ast.Slice):
+                return True
+        return False
+
+    def get_slice_as_index(self, node):
+        result = []
+        if isinstance(node, ast.Tuple):
+            for e in node.elts:
+                result.extend(self.get_slice_as_index(e))
+        else:
+            if isinstance(node, ast.Slice):
+                result.append([ast.NodeVisitor.visit(self, node.lower),
+                            arith.SubIOp(ast.NodeVisitor.visit(self, node.upper), ast.NodeVisitor.visit(self, node.lower)),
+                            constant(1)])
+            else:
+                result.append([ast.NodeVisitor.visit(self, node), constant(1), constant(1)])
+        return result
+    
     def visit_Subscript(self, node):
         if isinstance(node.ctx, ast.Load):
             mem_op = self.visit(node.value)
-            indexes = self.visit(node.slice)
-            # print(var, indexes)
-            from collections.abc import Iterable
-            if not isinstance(indexes, Iterable):
-                indexes = [indexes]
-            args = [index.CastUOp(T.index(), x) for x in indexes]            
-            shape = [ir.ShapedType.get_dynamic_size() for x in indexes]
-            shaped_mem_op = memref.CastOp(T.memref(*shape, T.i32()), mem_op)
-            return memref.load(shaped_mem_op, args)
+            if self.is_slice(node.slice):
+                slices = self.get_slice_as_index(node.slice)
+                print(list(zip(*slices)))
+                args = [[index.CastUOp(T.index(), x) for x in y] for y in zip(*slices)]            
+                shape = [ir.ShapedType.get_dynamic_size() for x in slices]
+                shaped_mem_op = memref.cast(T.memref(*shape, T.i32()), mem_op)
+                print(shaped_mem_op)
+                return memref.subview(shaped_mem_op, *args,
+                                      result_type = T.memref(*shape, T.i32(), layout=ir.StridedLayoutAttr.get(ir.ShapedType.get_dynamic_size(), shape)))
+            else:
+                indexes = self.visit(node.slice)
+                # print(var, indexes)
+                from collections.abc import Iterable
+                if not isinstance(indexes, Iterable):
+                    indexes = [indexes]
+                args = [index.CastUOp(T.index(), x) for x in indexes]            
+                shape = [ir.ShapedType.get_dynamic_size() for x in indexes]
+                shaped_mem_op = memref.CastOp(T.memref(*shape, T.i32()), mem_op)
+                return memref.load(shaped_mem_op, args)
         else:
             # TODO: Del, AugStore, etc
             print("Unsupported assignment context type %s" %
                             target.ctx.__class__.__name__)
 
+    def _do_assign(self, target, value):
+        #self.fctx.update_loc(target)
+        if isinstance(target, ast.Name):
+            if isinstance(target.ctx, ast.Store):
+                self.environment[target.id] = value
+            else:
+                # TODO: Del, AugStore, etc
+                print("Unsupported assignment context type %s" %
+                                target.ctx.__class__.__name__)
+        elif isinstance(target, ast.Subscript):
+            if isinstance(target.ctx, ast.Store):
+                mem_op = self.visit(target.value)
+                indexes = self.visit(target.slice)
+                # print(var, indexes)
+                from collections.abc import Iterable
+                if not isinstance(indexes, Iterable):
+                    indexes = [indexes]
+                args = [index.CastUOp(T.index(), x) for x in indexes]
+                shape = [ir.ShapedType.get_dynamic_size() for x in indexes]
+                shaped_mem_op = memref.CastOp(T.memref(*shape, T.i32()), mem_op)
+                memref.store(value, shaped_mem_op, args)
+            else:
+                # TODO: Del, AugStore, etc
+                print("Unsupported assignment context type %s" %
+                                target.ctx.__class__.__name__)
+        else:
+            # TODO: 
+            print("Unsupported assignment target %s" %
+                            target.__class__.__name__)
+
+    def visit_AnnAssign(self, node):
+        value = self.visit(node.value)
+        self._do_assign(node.target, value)
+    
     def visit_Assign(self, node):
         value = self.visit(node.value)
         for target in node.targets:
-            #self.fctx.update_loc(target)
-            if isinstance(target, ast.Name):
-                if isinstance(target.ctx, ast.Store):
-                    self.environment[target.id] = value
-                else:
-                    # TODO: Del, AugStore, etc
-                    print("Unsupported assignment context type %s" %
-                                    target.ctx.__class__.__name__)
-            elif isinstance(target, ast.Subscript):
-                if isinstance(target.ctx, ast.Store):
-                    mem_op = self.visit(target.value)
-                    indexes = self.visit(target.slice)
-                    # print(var, indexes)
-                    from collections.abc import Iterable
-                    if not isinstance(indexes, Iterable):
-                        indexes = [indexes]
-                    args = [index.CastUOp(T.index(), x) for x in indexes]
-                    shape = [ir.ShapedType.get_dynamic_size() for x in indexes]
-                    shaped_mem_op = memref.CastOp(T.memref(*shape, T.i32()), mem_op)
-                    memref.store(value, shaped_mem_op, args)
-                else:
-                    # TODO: Del, AugStore, etc
-                    print("Unsupported assignment context type %s" %
-                                    target.ctx.__class__.__name__)
-            else:
-                # TODO: 
-                print("Unsupported assignment target %s" %
-                                target.__class__.__name__)
+            self._do_assign(target, value)
 
     def visit_BinOp(self, node):
         left = self.visit(node.left)
@@ -277,7 +318,6 @@ class CodeGenerator(ast.NodeVisitor):
             size = len(iter_node.elts)
             g = memref.alloca(T.memref(size, to_mlir_type(itertype)), [], [])
             for i, e in enumerate(iter_node.elts):
-                print(i, e)
                 value = self.visit_Constant(e)
                 memref.store(value, g, [index.constant(i)])
             loop = ForOp(index.constant(0), index.constant(size), index.constant(1), liveins)
