@@ -14,12 +14,12 @@ from ..dialects.aie import *
 from ..dialects.aiex import *
 from ..extras.context import mlir_mod_ctx
 from ..helpers.dialects.ext.scf import *
-from ..dialects import memref, arith, func, tensor, index, scf
+from ..dialects import memref, arith, func, tensor, index, scf, linalg
 from ..extras.dialects.ext.arith import constant
 from ..extras.dialects.ext.memref import alloca
 from ..helpers.util import np_dtype_to_mlir_type, infer_mlir_type
-# from ..extras.runtime.passes import Pipeline
-# from ..passmanager import PassManager
+from ..extras.runtime.passes import Pipeline
+from ..passmanager import PassManager
 # from ..execution_engine import ExecutionEngine
 from .resolvable import Resolvable
 from .. import ir
@@ -101,13 +101,19 @@ class FloatOpEncoder(ast.NodeVisitor):
     def visit_Div(self, node):
         return arith.divf
 
+class SequenceOpEncoder(ast.NodeVisitor):
+    def visit_MatMult(self, node):
+        return linalg.matmul
+
 def get_mlir_BinOp(op, type):
     if type == "int":
         return IntegerOpEncoder().visit(op)
     elif type == "float":
         return FloatOpEncoder().visit(op)
+    elif type == "Sequence":
+        return SequenceOpEncoder().visit(op)
     else:
-        raise Exception("Unknown binop type")
+        raise Exception("Unknown binop type", type)
 
 
 class CodeGenerator(ast.NodeVisitor):
@@ -132,15 +138,34 @@ class CodeGenerator(ast.NodeVisitor):
     def visit_Tuple(self, node):
         return [ast.NodeVisitor.visit(self, x) for x in node.elts]
 
+    def canonicalize_function_name(self, func):
+        if isinstance(func, ast.Name):
+            return (None, func.id)
+        elif isinstance(func, ast.Attribute):
+            return (func.value.id, func.attr)
+        else:
+            return (None, None)
+        
     def visit_Call(self, node):
         # print(self.indent, node)
-        if(node.func.attr == 'ndarray'):
+        (mod, name) = self.canonicalize_function_name(node.func)
+        if(name == 'ndarray'):
             args = [index.CastUOp(T.index(), ast.NodeVisitor.visit(self, x)) for x in node.args[0].elts]
             #op = memref.AllocOp(T.memref(T.f32()), args, [])
             allocaop = alloca(args, T.f32(), alignment=64)
             op = memref.CastOp(T.memref(ir.ShapedType.get_dynamic_size(), ir.ShapedType.get_dynamic_size(), T.f32()), alloca)
             return op
-            #        return tensor.CastOp(to_mlir_type('ndarray'), op)
+        if(name == 'matmul'):
+            # FIXME: support for return-value version without "out="
+            args = [memref.CastOp(T.memref(ir.ShapedType.get_dynamic_size(), ir.ShapedType.get_dynamic_size(), T.i32()), ast.NodeVisitor.visit(self, x)) for x in node.args]
+            kwargs = {kw.arg: ast.NodeVisitor.visit(self, kw.value) for kw in node.keywords}
+            kwargs['outs'] = kwargs['out']
+            del kwargs['out']
+            op = linalg.matmul(*args, outs=[memref.CastOp(T.memref(ir.ShapedType.get_dynamic_size(), ir.ShapedType.get_dynamic_size(), T.i32()), kwargs['outs'])])
+            return op
+
+    def visit_Expr(self, node):
+        return [ast.NodeVisitor.visit(self, node.value)]
 
     def visit_Module(self, node):
         return [ast.NodeVisitor.visit(self, child) for child in node.body]
@@ -387,43 +412,6 @@ def process_core_function(fn):
         raise e
 
     return result
-    # res = ctx.module.operation.verify()
-    # if res == True:
-    #     print(ctx.module)
-    # else:
-    #     print(res)
-
-    # LOWER_TO_LLVM_PIPELINE = (
-    #     Pipeline()
-    #     .canonicalize()
-    #     .cse()
-    #     .one_shot_bufferize()
-    #     .buffer_results_to_out_params()
-    #     .convert_vector_to_llvm()
-    #     .expand_strided_metadata()
-    #     .lower_affine()
-    #     .convert_math_to_llvm()
-    #     .convert_index_to_llvm()
-    #     .arith_expand()
-    #     .convert_arith_to_llvm()
-    #     .finalize_memref_to_llvm()
-    #     .convert_func_to_llvm(use_bare_ptr_memref_call_conv=True)
-    #     .convert_cf_to_llvm()
-    #     .canonicalize()
-    #     .cse()
-    # )
-
-    # pm = PassManager.parse(str(LOWER_TO_LLVM_PIPELINE))
-    # try:
-    #     pm.run(ctx.module.operation)
-    # except Exception as e:
-    #     print("Error running pass pipeline: ", pass_pipeline, e)
-    #     raise e
-
-    # print(ctx.module)
-    
-    
-    #await self.do_call(task, ["aie-translate", "--mlir-to-llvmir", file_opt_core, "-o", file_core_llvmir])
 
 def get_mlir(fn):
     with mlir_mod_ctx() as ctx:
@@ -433,6 +421,7 @@ class PyKernel(Resolvable):
     def __init__(
         self,
         name: str,
+        passes: Pipeline | None = None,
     ) -> None:
         """A Kernel is an externally defined function that eventually resolves to a FuncOp. If it is called,
         a CallOp will be generated.
@@ -442,6 +431,7 @@ class PyKernel(Resolvable):
         """
         self._name = name
         self._op: FuncOp | None = None
+        self._passes = passes
 
     def resolve(
         self,
@@ -450,6 +440,20 @@ class PyKernel(Resolvable):
     ) -> None:
         if not self._op:
             self._op = process_core_function(self._name)
+
+        if self._passes is not None:
+            if isinstance(self._passes, Pipeline):
+                strpasses = Pipeline().Func(self._passes).materialize(module=False)
+            else:
+                strpasses = str(self._passes)
+            pm = PassManager.parse(strpasses)
+            try:
+                pm.run(self._op)
+                # print("Transformed:", self._op)
+            except Exception as e:
+                print("Error running pass pipeline: ", self._passes, e)
+                raise e
+
 
     def downcast_arg(self, x, t):
         if isinstance(t, T.MemRefType) or isinstance(t, T.UnrankedMemRefType):
