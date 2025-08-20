@@ -333,9 +333,12 @@ def do_run(command, verbose=False):
     if verbose:
         print(" ".join(command))
     m = subprocess.PIPE
-    ret = subprocess.run(command, stdout=m, stderr=m, universal_newlines=True)
-    return ret
-
+    try:
+        ret = subprocess.run(command, stdout=m, stderr=m, universal_newlines=True, check=True)
+        return ret
+    except subprocess.CalledProcessError as e:
+        print(f"{e.stderr}", file=sys.stderr)
+        sys.exit(-1)
 
 def run_passes(pass_pipeline, mlir_module_str, outputfile=None, verbose=False):
     if verbose:
