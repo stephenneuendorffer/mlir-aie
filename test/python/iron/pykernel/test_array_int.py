@@ -127,6 +127,8 @@ def test_slice2(x:Sequence[int], o:Sequence[int]):
     acc = 0
     o[0,0:10] = x[0,10:20]
 
+# from aie.iron.pykernel import get_mlir
+# print(get_mlir(test_slice2))
 # def test_fn3(x:Sequence[int], o:Sequence[int]):
 #     return np.ndarray((x, x), int)
 
@@ -184,7 +186,7 @@ def main():
     jit_test(test_loop1, "tensor([0,2,1,...,0,0,0], device='npu')")
     jit_test(test_loop2, "tensor([3,3,2,...,0,0,0], device='npu')")
     jit_test(test_slice, "tensor([10,12,14,..., 0, 0, 0], device='npu')")
-    # jit_test(test_slice2, "tensor([10,11,12,..., 0, 0, 0], device='npu')")
+    jit_test(test_slice2, "tensor([10,11,12,..., 0, 0, 0], device='npu')")
 
 if __name__ == "__main__":
     main()

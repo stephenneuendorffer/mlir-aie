@@ -152,7 +152,7 @@ def main():
     jit_test(test_nop, "tensor([1,0,0,...,0,0,0], device='npu')")
     jit_test(test_mul, "tensor([6,0,0,...,0,0,0], device='npu')")
     # jit_test(test_div, "")
-    jit_test(test_loop1, "tensor([2,1,0,...,0,0,0], device='npu')")
+    jit_test(test_loop1, "tensor([0,2,1,...,0,0,0], device='npu')")
     jit_test(test_loop2, "tensor([3,3,2,...,0,0,0], device='npu')")
 
 if __name__ == "__main__":

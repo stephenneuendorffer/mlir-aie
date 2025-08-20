@@ -211,11 +211,9 @@ class CodeGenerator(ast.NodeVisitor):
             mem_op = self.visit(node.value)
             if self.is_slice(node.slice):
                 slices = self.get_slice_as_index(node.slice)
-                print(list(zip(*slices)))
                 args = [[index.CastUOp(T.index(), x) for x in y] for y in zip(*slices)]            
                 shape = [ir.ShapedType.get_dynamic_size() for x in slices]
                 shaped_mem_op = memref.cast(T.memref(*shape, T.i32()), mem_op)
-                print(shaped_mem_op)
                 return memref.subview(shaped_mem_op, *args,
                                       result_type = T.memref(*shape, T.i32(), layout=ir.StridedLayoutAttr.get(ir.ShapedType.get_dynamic_size(), shape)))
             else:
@@ -244,16 +242,26 @@ class CodeGenerator(ast.NodeVisitor):
                                 target.ctx.__class__.__name__)
         elif isinstance(target, ast.Subscript):
             if isinstance(target.ctx, ast.Store):
-                mem_op = self.visit(target.value)
-                indexes = self.visit(target.slice)
-                # print(var, indexes)
-                from collections.abc import Iterable
-                if not isinstance(indexes, Iterable):
-                    indexes = [indexes]
-                args = [index.CastUOp(T.index(), x) for x in indexes]
-                shape = [ir.ShapedType.get_dynamic_size() for x in indexes]
-                shaped_mem_op = memref.CastOp(T.memref(*shape, T.i32()), mem_op)
-                memref.store(value, shaped_mem_op, args)
+                if self.is_slice(target.slice):
+                    mem_op = self.visit(target.value)
+                    slices = self.get_slice_as_index(target.slice)
+                    args = [[index.CastUOp(T.index(), x) for x in y] for y in zip(*slices)]            
+                    shape = [ir.ShapedType.get_dynamic_size() for x in slices]
+                    shaped_mem_op = memref.cast(T.memref(*shape, T.i32()), mem_op)
+                    target_subview = memref.subview(shaped_mem_op, *args,
+                                        result_type = T.memref(*shape, T.i32(), layout=ir.StridedLayoutAttr.get(ir.ShapedType.get_dynamic_size(), shape)))            
+                    memref.copy(value, target_subview)
+                else:
+                    mem_op = self.visit(target.value)
+                    indexes = self.visit(target.slice)
+                    # print(var, indexes)
+                    from collections.abc import Iterable
+                    if not isinstance(indexes, Iterable):
+                        indexes = [indexes]
+                    args = [index.CastUOp(T.index(), x) for x in indexes]
+                    shape = [ir.ShapedType.get_dynamic_size() for x in indexes]
+                    shaped_mem_op = memref.CastOp(T.memref(*shape, T.i32()), mem_op)
+                    memref.store(value, shaped_mem_op, args)
             else:
                 # TODO: Del, AugStore, etc
                 print("Unsupported assignment context type %s" %
