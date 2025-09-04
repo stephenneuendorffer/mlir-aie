@@ -14,7 +14,7 @@ from ..dialects.aie import *
 from ..dialects.aiex import *
 from ..extras.context import mlir_mod_ctx
 from ..helpers.dialects.ext.scf import *
-from ..dialects import memref, arith, func, tensor, index, scf, linalg
+from ..dialects import memref, arith, func, affine, index, scf, linalg
 from ..extras.dialects.ext.arith import constant
 from ..extras.dialects.ext.memref import alloca
 from ..helpers.util import np_dtype_to_mlir_type, infer_mlir_type
@@ -45,6 +45,11 @@ _ast_type_to_mlir_type = defaultdict(
     }
 )
 
+def is_memref_type(t):
+    if isinstance(t, T.MemRefType) or isinstance(t, T.UnrankedMemRefType):
+        return True
+    return False
+
 def to_mlir_type(x):
     if x == "int":
         return T.i32()
@@ -71,6 +76,9 @@ def to_mlir_type(x):
         raise AttributeError(
             f"Failed to map ast type to mlir python type: {str(x)}"
         )
+
+def index_cast(x):
+    return index.castu(T.index(), x) if x.dtype != T.index() else x
 
 # Add | Sub | Mult | MatMult | Div | Mod | Pow | LShift
 #                  | RShift | BitOr | BitXor | BitAnd | FloorDiv
@@ -150,7 +158,7 @@ class CodeGenerator(ast.NodeVisitor):
         # print(self.indent, node)
         (mod, name) = self.canonicalize_function_name(node.func)
         if(name == 'ndarray'):
-            args = [index.CastUOp(T.index(), ast.NodeVisitor.visit(self, x)) for x in node.args[0].elts]
+            args = [index_cast(ast.NodeVisitor.visit(self, x)) for x in node.args[0].elts]
             #op = memref.AllocOp(T.memref(T.f32()), args, [])
             allocaop = alloca(args, T.f32(), alignment=64)
             op = memref.CastOp(T.memref(ir.ShapedType.get_dynamic_size(), ir.ShapedType.get_dynamic_size(), T.f32()), alloca)
@@ -225,7 +233,7 @@ class CodeGenerator(ast.NodeVisitor):
         else:
             if isinstance(node, ast.Slice):
                 result.append([ast.NodeVisitor.visit(self, node.lower),
-                            arith.SubIOp(ast.NodeVisitor.visit(self, node.upper), ast.NodeVisitor.visit(self, node.lower)),
+                            arith.subi(ast.NodeVisitor.visit(self, node.upper), ast.NodeVisitor.visit(self, node.lower)),
                             constant(1)])
             else:
                 result.append([ast.NodeVisitor.visit(self, node), constant(1), constant(1)])
@@ -236,7 +244,7 @@ class CodeGenerator(ast.NodeVisitor):
             mem_op = self.visit(node.value)
             if self.is_slice(node.slice):
                 slices = self.get_slice_as_index(node.slice)
-                args = [[index.CastUOp(T.index(), x) for x in y] for y in zip(*slices)]            
+                args = [[index_cast(x) for x in y] for y in zip(*slices)]            
                 shape = [ir.ShapedType.get_dynamic_size() for x in slices]
                 shaped_mem_op = memref.cast(T.memref(*shape, T.i32()), mem_op)
                 return memref.subview(shaped_mem_op, *args,
@@ -247,7 +255,7 @@ class CodeGenerator(ast.NodeVisitor):
                 from collections.abc import Iterable
                 if not isinstance(indexes, Iterable):
                     indexes = [indexes]
-                args = [index.CastUOp(T.index(), x) for x in indexes]            
+                args = [index_cast(x) for x in indexes]            
                 shape = [ir.ShapedType.get_dynamic_size() for x in indexes]
                 shaped_mem_op = memref.CastOp(T.memref(*shape, T.i32()), mem_op)
                 return memref.load(shaped_mem_op, args)
@@ -270,7 +278,7 @@ class CodeGenerator(ast.NodeVisitor):
                 if self.is_slice(target.slice):
                     mem_op = self.visit(target.value)
                     slices = self.get_slice_as_index(target.slice)
-                    args = [[index.CastUOp(T.index(), x) for x in y] for y in zip(*slices)]            
+                    args = [[index_cast(x) for x in y] for y in zip(*slices)]            
                     shape = [ir.ShapedType.get_dynamic_size() for x in slices]
                     shaped_mem_op = memref.cast(T.memref(*shape, T.i32()), mem_op)
                     target_subview = memref.subview(shaped_mem_op, *args,
@@ -283,7 +291,7 @@ class CodeGenerator(ast.NodeVisitor):
                     from collections.abc import Iterable
                     if not isinstance(indexes, Iterable):
                         indexes = [indexes]
-                    args = [index.CastUOp(T.index(), x) for x in indexes]
+                    args = [index_cast(x) for x in indexes]
                     shape = [ir.ShapedType.get_dynamic_size() for x in indexes]
                     shaped_mem_op = memref.CastOp(T.memref(*shape, T.i32()), mem_op)
                     memref.store(value, shaped_mem_op, args)
@@ -321,6 +329,16 @@ class CodeGenerator(ast.NodeVisitor):
             raise AttributeError(
                 f"BinOp types don't match: {str(lefttype)} and {str(righttype)} in '{ast.unparse(node)}'"
             )
+
+        if left.dtype == T.index():
+            left = index.castu(right.dtype, left)
+        if right.dtype == T.index():
+            right = index.castu(left.dtype, right)
+
+        if left.dtype != right.dtype:
+            raise AttributeError(
+                f"BinOp MLIR types don't match: {str(left.dtype)} and {str(right.dtype)} in '{ast.unparse(node)}'"
+            )
         mlirop = get_mlir_BinOp(node.op, lefttype._name)
         return mlirop(left, right)
         
@@ -335,16 +353,22 @@ class CodeGenerator(ast.NodeVisitor):
     def _get_for_range(self, iter_node):
         args = iter_node.args
         if len(args) == 1:
-            return (constant(0), self.visit(args[0]), constant(1))
+            return (index.constant(0),
+                    index_cast(self.visit(args[0])),
+                    index.constant(1))
         elif len(args) == 2:
-            return (self.visit(args[0]), self.visit(args[1]), constant(1))
+            return (index_cast(self.visit(args[0])),
+                    index_cast(self.visit(args[1])),
+                    1)
         else:
-            return (self.visit(args[0]), self.visit(args[1]), self.visit(args[2]))
+            return (index_cast(self.visit(args[0])),
+                    index_cast(self.visit(args[1])),
+                    self.visit(args[1]).literal_value())
 
     def _get_for_loop(self, iter_node, liveins):
         if isinstance(iter_node, ast.Call) and iter_node.func.id == "range":
             (lb, ub, step) = self._get_for_range(iter_node)
-            loop = ForOp(lb, ub, step, liveins)
+            loop = affine.AffineForOp(lb, ub, step, liveins)
             return (loop, loop.induction_variable)
         elif isinstance(iter_node, ast.List):
             itertype = self.get_type(iter_node.elts[0])
@@ -353,7 +377,7 @@ class CodeGenerator(ast.NodeVisitor):
             for i, e in enumerate(iter_node.elts):
                 value = self.visit_Constant(e)
                 memref.store(value, g, [index.constant(i)])
-            loop = ForOp(index.constant(0), index.constant(size), index.constant(1), liveins)
+            loop = affine.AffineForOp(index.constant(0), index.constant(size), 1, liveins)
             with InsertionPoint(loop.body):
                 val = memref.load(g, [loop.induction_variable])
             return (loop, val)
@@ -375,7 +399,7 @@ class CodeGenerator(ast.NodeVisitor):
                 ast.NodeVisitor.visit(self, child)
 
             # At the end of the loop, yield any new values of loop-carried variables
-            scf.YieldOp([self.environment[arg] for arg in iter_args])
+            affine.yield_([self.environment[arg] for arg in iter_args])
         for (i, arg) in enumerate(iter_args):
             self.environment[arg] = loop.results[i]
         return loop
@@ -456,7 +480,7 @@ class PyKernel(Resolvable):
 
 
     def downcast_arg(self, x, t):
-        if isinstance(t, T.MemRefType) or isinstance(t, T.UnrankedMemRefType):
+        if is_memref_type(t):
             return memref.CastOp(t, x)
         else:
             return x
