@@ -157,11 +157,24 @@ class CodeGenerator(ast.NodeVisitor):
     def visit_Call(self, node):
         # print(self.indent, node)
         (mod, name) = self.canonicalize_function_name(node.func)
+        if(name == 'ndim'):
+            tensor = self.visit(node.args[0])
+            rank = memref.rank(tensor)
+            return index.castu(T.i32(), rank)
+        if(name == 'size'):
+            tensor = self.visit(node.args[0])
+            idx = self.visit(node.args[1])
+            size = memref.dim(tensor, idx)
+            return index.castu(T.i32(), size)
         if(name == 'ndarray'):
             args = [index_cast(ast.NodeVisitor.visit(self, x)) for x in node.args[0].elts]
-            #op = memref.AllocOp(T.memref(T.f32()), args, [])
             allocaop = alloca(args, T.f32(), alignment=64)
-            op = memref.CastOp(T.memref(ir.ShapedType.get_dynamic_size(), ir.ShapedType.get_dynamic_size(), T.f32()), alloca)
+            op = memref.CastOp(T.memref(ir.ShapedType.get_dynamic_size(), ir.ShapedType.get_dynamic_size(), T.f32()), allocaop)
+            return op
+        if(name == 'zeros'):
+            args = [index_cast(ast.NodeVisitor.visit(self, x)) for x in node.args[0].elts]
+            allocaop = alloca(args, T.f32(), alignment=64)
+            op = memref.CastOp(T.memref(ir.ShapedType.get_dynamic_size(), ir.ShapedType.get_dynamic_size(), T.f32()), allocaop)
             return op
         if(name == 'matmul'):
             # FIXME: support for return-value version without "out="
@@ -171,6 +184,7 @@ class CodeGenerator(ast.NodeVisitor):
             del kwargs['out']
             op = linalg.matmul(*args, outs=[memref.CastOp(T.memref(ir.ShapedType.get_dynamic_size(), ir.ShapedType.get_dynamic_size(), T.i32()), kwargs['outs'])])
             return op
+        raise Exception("Unsupported function call", name)
 
     def visit_Expr(self, node):
         return [ast.NodeVisitor.visit(self, node.value)]
@@ -353,9 +367,9 @@ class CodeGenerator(ast.NodeVisitor):
     def _get_for_range(self, iter_node):
         args = iter_node.args
         if len(args) == 1:
-            return (index.constant(0),
+            return (0,
                     index_cast(self.visit(args[0])),
-                    index.constant(1))
+                    1)
         elif len(args) == 2:
             return (index_cast(self.visit(args[0])),
                     index_cast(self.visit(args[1])),
@@ -475,7 +489,8 @@ class PyKernel(Resolvable):
                 pm.run(self._op)
                 # print("Transformed:", self._op)
             except Exception as e:
-                print("Error running pass pipeline: ", self._passes, e)
+                print("Error running pass pipeline: ", self._passes)
+                print(self._op)
                 raise e
 
 

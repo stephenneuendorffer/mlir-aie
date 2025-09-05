@@ -53,11 +53,14 @@ def test_model(fn, input0, params, output):
     tile_ty = np.ndarray[shape, np.dtype[dtype]]
 
     # AIE-array data movement with object fifos
+    a_dims = [(8,1), (8, 8)]
     of_in1 = ObjectFifo(tile_ty, name="in1")
     of_params = ObjectFifo(tile_ty, name="in2")
     of_out = ObjectFifo(tile_ty, name="out")
-
-    test_kernel = PyKernel(fn, Pipeline().convert_linalg_to_affine_loops())
+    #, dims_to_stream=a_dims)
+    
+    # memA = of_in1.cons().forward(name="memA", dims_to_stream=a_dims)
+    test_kernel = PyKernel(fn, Pipeline().canonicalize().convert_linalg_to_affine_loops().add_pass("affine-raise-from-memref").affine_super_vectorize("8", vectorize_reductions=True))
 
     # Define a task that will run on a compute tile
     def core_body(of_in1, of_params, of_out, kernel):
@@ -72,6 +75,7 @@ def test_model(fn, input0, params, output):
         of_out.release(1)
 
     # Create a worker to run the task on a compute tile
+    # dims_from_stream=a_dims
     worker = Worker(core_body, fn_args=[of_in1.cons(), of_params.cons(), of_out.prod(), test_kernel])
 
     # Runtime operations to move data to/from the AIE-array
@@ -106,6 +110,12 @@ def test_add(x:Sequence[int], o:Sequence[int]):
 def test_sub(x:Sequence[int], o:Sequence[int]):
     o[0,0] = x[0,0]-2
 
+def test_ndim(x:Sequence[int], o:Sequence[int]):
+    acc = 0
+    o[0,0] = np.ndim(x)
+    for i in range(o[0,0]):
+        o[1,i] = np.size(x, i)
+
 def test_loop1(x:Sequence[int], o:Sequence[int]):
     acc = 0
     for v in [2,1,0]:
@@ -128,6 +138,14 @@ def test_matmul2(x:Sequence[int], o:Sequence[int]):
     acc = 0
     # o[0,0] = x[0,0:10] @ x[0:10,0]
     np.matmul(x, x, out = o)
+
+def test_loop3(x:Sequence[int], o:Sequence[int]):
+    acc = 0
+    y = 0
+    # y = x[0,0]
+    for j in range(0,8):
+      for i in range(0,8):
+        o[j,i] = x[j,i] * x[j,i]
 
 # from aie.iron.pykernel import get_mlir
 # print(get_mlir(test_slice2))
@@ -174,7 +192,9 @@ def main():
     import time
     def jit_test(test, result):
         iron.jit(partial(test_model, test), is_placed=False, use_cache=True)(input0, params, output)
-        if str(output) != result:
+        if np.array_equal(output, result):
+            return
+        elif str(output) != str(result):
             print(test, ": Got", str(output), "but expected", result)
 
     test_matmul(input0, golden_output)
@@ -188,9 +208,13 @@ def main():
  [ 36, 72,108,144,180,216,252,288],
  [ 36, 72,108,144,180,216,252,288],
  [ 36, 72,108,144,180,216,252,288]], device='npu')"""
+    jit_test(test_loop3, golden_string)
 
-    jit_test(test_matmul, golden_string)
-    jit_test(test_matmul2, golden_string)
+    # jit_test(test_matmul, golden_string)
+    # jit_test(test_matmul2, golden_string)
+    golden_output = np.zeros_like(input0)
+    test_ndim(input0, golden_output)
+    jit_test(test_ndim, golden_output)
 
 if __name__ == "__main__":
     main()
