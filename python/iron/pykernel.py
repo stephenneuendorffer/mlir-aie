@@ -51,13 +51,15 @@ def is_memref_type(t):
     return False
 
 def to_mlir_type(x):
-    if x == "int":
+    if x == "int" or x == "int32":
         return T.i32()
     elif x == "float":
         return T.f32()
     # Handle AST nodes to deal with type annotations
     elif isinstance(x, ast.Name):
         return to_mlir_type(x.id)
+    elif isinstance(x, ast.Attribute):
+        return to_mlir_type(x.attr)
     elif isinstance(x, ast.Subscript):
         element_type = to_mlir_type(x.slice)
         if x.value.id == "ndarray" or x.value.id == "array" or x.value.id == "Sequence":
@@ -77,8 +79,8 @@ def to_mlir_type(x):
             f"Failed to map ast type to mlir python type: {str(x)}"
         )
 
-def index_cast(x):
-    return index.castu(T.index(), x) if x.dtype != T.index() else x
+def index_cast(t, x):
+    return index.castu(t, x) if x.dtype != t else x
 
 # Add | Sub | Mult | MatMult | Div | Mod | Pow | LShift
 #                  | RShift | BitOr | BitXor | BitAnd | FloorDiv
@@ -114,7 +116,7 @@ class SequenceOpEncoder(ast.NodeVisitor):
         return linalg.matmul
 
 def get_mlir_BinOp(op, type):
-    if type == "int":
+    if type == "int" or type == "int32":
         return IntegerOpEncoder().visit(op)
     elif type == "float":
         return FloatOpEncoder().visit(op)
@@ -135,7 +137,10 @@ class CodeGenerator(ast.NodeVisitor):
         if result is None:
 
             print("Unknown Type for", ast.dump(node))
-            raise Exception("Type Inference failure", node) 
+            if isinstance(node,ast.BinOp):
+                print("Left:", node.left, astypes.get_type(astypes.find_node(self.typetree, node.left)))
+                print("Right:", node.left, astypes.get_type(astypes.find_node(self.typetree, node.right)))
+            raise Exception("Type Inference failure", {ast.dump(node)}) 
         logging.debug(f"Type of {ast.dump(node)} is {result}")
         return result
 
@@ -157,22 +162,25 @@ class CodeGenerator(ast.NodeVisitor):
     def visit_Call(self, node):
         # print(self.indent, node)
         (mod, name) = self.canonicalize_function_name(node.func)
+        if(name == 'int32'):
+            v = self.visit(node.args[0])
+            return index_cast(T.i32(), v)
         if(name == 'ndim'):
             tensor = self.visit(node.args[0])
             rank = memref.rank(tensor)
-            return index.castu(T.i32(), rank)
+            return index_cast(T.i32(), rank)
         if(name == 'size'):
             tensor = self.visit(node.args[0])
             idx = self.visit(node.args[1])
             size = memref.dim(tensor, idx)
-            return index.castu(T.i32(), size)
+            return index_cast(T.i32(), size)
         if(name == 'ndarray'):
-            args = [index_cast(ast.NodeVisitor.visit(self, x)) for x in node.args[0].elts]
+            args = [index_cast(T.index(), ast.NodeVisitor.visit(self, x)) for x in node.args[0].elts]
             allocaop = alloca(args, T.f32(), alignment=64)
             op = memref.CastOp(T.memref(ir.ShapedType.get_dynamic_size(), ir.ShapedType.get_dynamic_size(), T.f32()), allocaop)
             return op
         if(name == 'zeros'):
-            args = [index_cast(ast.NodeVisitor.visit(self, x)) for x in node.args[0].elts]
+            args = [index_cast(T.index(), ast.NodeVisitor.visit(self, x)) for x in node.args[0].elts]
             allocaop = alloca(args, T.f32(), alignment=64)
             op = memref.CastOp(T.memref(ir.ShapedType.get_dynamic_size(), ir.ShapedType.get_dynamic_size(), T.f32()), allocaop)
             return op
@@ -258,7 +266,7 @@ class CodeGenerator(ast.NodeVisitor):
             mem_op = self.visit(node.value)
             if self.is_slice(node.slice):
                 slices = self.get_slice_as_index(node.slice)
-                args = [[index_cast(x) for x in y] for y in zip(*slices)]            
+                args = [[index_cast(T.index(), x) for x in y] for y in zip(*slices)]            
                 shape = [ir.ShapedType.get_dynamic_size() for x in slices]
                 shaped_mem_op = memref.cast(T.memref(*shape, T.i32()), mem_op)
                 return memref.subview(shaped_mem_op, *args,
@@ -269,7 +277,7 @@ class CodeGenerator(ast.NodeVisitor):
                 from collections.abc import Iterable
                 if not isinstance(indexes, Iterable):
                     indexes = [indexes]
-                args = [index_cast(x) for x in indexes]            
+                args = [index_cast(T.index(), x) for x in indexes]            
                 shape = [ir.ShapedType.get_dynamic_size() for x in indexes]
                 shaped_mem_op = memref.CastOp(T.memref(*shape, T.i32()), mem_op)
                 return memref.load(shaped_mem_op, args)
@@ -292,7 +300,7 @@ class CodeGenerator(ast.NodeVisitor):
                 if self.is_slice(target.slice):
                     mem_op = self.visit(target.value)
                     slices = self.get_slice_as_index(target.slice)
-                    args = [[index_cast(x) for x in y] for y in zip(*slices)]            
+                    args = [[index_cast(T.index(), x) for x in y] for y in zip(*slices)]            
                     shape = [ir.ShapedType.get_dynamic_size() for x in slices]
                     shaped_mem_op = memref.cast(T.memref(*shape, T.i32()), mem_op)
                     target_subview = memref.subview(shaped_mem_op, *args,
@@ -305,7 +313,7 @@ class CodeGenerator(ast.NodeVisitor):
                     from collections.abc import Iterable
                     if not isinstance(indexes, Iterable):
                         indexes = [indexes]
-                    args = [index_cast(x) for x in indexes]
+                    args = [index_cast(T.index(), x) for x in indexes]
                     shape = [ir.ShapedType.get_dynamic_size() for x in indexes]
                     shaped_mem_op = memref.CastOp(T.memref(*shape, T.i32()), mem_op)
                     memref.store(value, shaped_mem_op, args)
@@ -344,10 +352,8 @@ class CodeGenerator(ast.NodeVisitor):
                 f"BinOp types don't match: {str(lefttype)} and {str(righttype)} in '{ast.unparse(node)}'"
             )
 
-        if left.dtype == T.index():
-            left = index.castu(right.dtype, left)
-        if right.dtype == T.index():
-            right = index.castu(left.dtype, right)
+        left = index_cast(right.dtype, left)
+        right = index_cast(left.dtype, right)
 
         if left.dtype != right.dtype:
             raise AttributeError(
@@ -368,15 +374,15 @@ class CodeGenerator(ast.NodeVisitor):
         args = iter_node.args
         if len(args) == 1:
             return (0,
-                    index_cast(self.visit(args[0])),
+                    index_cast(T.index(), self.visit(args[0])),
                     1)
         elif len(args) == 2:
-            return (index_cast(self.visit(args[0])),
-                    index_cast(self.visit(args[1])),
+            return (index_cast(T.index(), self.visit(args[0])),
+                    index_cast(T.index(), self.visit(args[1])),
                     1)
         else:
-            return (index_cast(self.visit(args[0])),
-                    index_cast(self.visit(args[1])),
+            return (index_cast(T.index(), self.visit(args[0])),
+                    index_cast(T.index(), self.visit(args[1])),
                     self.visit(args[1]).literal_value())
 
     def _get_for_loop(self, iter_node, liveins):
@@ -432,7 +438,9 @@ def process_core_function(fn):
     if isinstance(fn, str):
         source = fn
     else:
-        source = inspect.getsource(fn)
+        sourcefile = inspect.getfile(fn)
+        file = open(sourcefile, "r")
+        source = file.read()
 
     try:
         tree = ast.parse(source)
@@ -442,11 +450,13 @@ def process_core_function(fn):
     typetree = astroid.parse(source)
     generator = CodeGenerator(typetree)
     result = None
+    matches = [f for f in tree.body
+        if isinstance(f, ast.FunctionDef) and f.name == fn.__name__]
     try:
-        result = generator.visit(tree.body[0])
+        result = generator.visit(matches[0])
     except Exception as e:
         print("In: ")
-        print(ast.dump(tree, indent=4))
+        print(ast.dump(matches[0], indent=4))
         raise e
 
     return result

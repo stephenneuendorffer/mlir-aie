@@ -34,7 +34,6 @@ import aie.dialects.tensor as tensor
 import aie.dialects.index as index
 import aie.dialects.linalg as linalg
 import aie.ir
-
     
 def test_model(fn, input0, params, output):
     num_elements = np.size(input0)
@@ -91,25 +90,6 @@ def test_model(fn, input0, params, output):
 
 # JIT-compile the kernel then launches the kernel with the given arguments. Future calls
 # to the kernel will use the same compiled kernel and loaded code objects
-def test_nop(x:Sequence[int], o:Sequence[int]):
-    o[0,0] = 1
-    return
-
-def test_nop_implicitreturn(x:Sequence[int], o:Sequence[int]):
-    o[0,0] = x[0,0]
-
-def test_mul(x:Sequence[int], o:Sequence[int]):
-    o[0,0] = x[0,0]*2
-
-def test_div(x:Sequence[int], o:Sequence[int]):
-    o[0,0] = x[0,0]/2
-
-def test_add(x:Sequence[int], o:Sequence[int]):
-    o[0,0] = x[0,0]+2
-
-def test_sub(x:Sequence[int], o:Sequence[int]):
-    o[0,0] = x[0,0]-2
-
 def test_ndim(x:Sequence[int], o:Sequence[int]):
     acc = 0
     o[0,0] = np.ndim(x)
@@ -122,12 +102,21 @@ def test_loop1(x:Sequence[int], o:Sequence[int]):
         acc = acc + 1
         o[0,acc] = v
 
-def test_loop2(x:Sequence[int], o:Sequence[int]):
+def test_loop_int(x:Sequence[np.int32], o:Sequence[np.int32]):
+    acc = 0
+
+    y = np.int32(0)
+    # y = x[0,0]
+    for i in range(0,8):
+        o[0,i] = x[0,i] + y + np.int32(i)
+
+def test_loop3(x:Sequence[int], o:Sequence[int]):
     acc = 0
     y = 0
     # y = x[0,0]
-    for i in range(0,10):
-        o[0,i] = x[0,i] + y + i
+    for j in range(0,8):
+      for i in range(0,8):
+        o[j,i] = x[j,i] * x[j,i]
 
 def test_matmul(x:Sequence[int], o:Sequence[int]):
     acc = 0
@@ -139,13 +128,6 @@ def test_matmul2(x:Sequence[int], o:Sequence[int]):
     # o[0,0] = x[0,0:10] @ x[0:10,0]
     np.matmul(x, x, out = o)
 
-def test_loop3(x:Sequence[int], o:Sequence[int]):
-    acc = 0
-    y = 0
-    # y = x[0,0]
-    for j in range(0,8):
-      for i in range(0,8):
-        o[j,i] = x[j,i] * x[j,i]
 
 # from aie.iron.pykernel import get_mlir
 # print(get_mlir(test_slice2))
@@ -215,6 +197,10 @@ def main():
     golden_output = np.zeros_like(input0)
     test_ndim(input0, golden_output)
     jit_test(test_ndim, golden_output)
+
+    golden_output = np.zeros_like(input0)
+    test_loop_int(input0, golden_output)
+    jit_test(test_loop_int, golden_output)
 
 if __name__ == "__main__":
     main()
