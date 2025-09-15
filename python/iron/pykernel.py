@@ -29,6 +29,18 @@ import ast, inspect
 import astroid
 import astypes
 
+### Inject some type definitions into astroid, so we can properly infer them.
+def ml_dtypes_transform():
+    return astroid.parse("""
+    class bfloat16(floating): pass
+    """
+    )
+
+astroid.register_module_extender(
+    astroid.MANAGER, "ml_dtypes", ml_dtypes_transform
+)
+
+
 from collections import defaultdict
 from collections.abc import Iterable
 import aie.extras.types as T
@@ -55,6 +67,10 @@ def to_mlir_type(x):
         return T.i32()
     elif x == "int8":
         return T.i8()
+    elif x == "int16":
+        return T.i16()
+    elif x == "bfloat16":
+        return T.bf16()
     elif x == "float":
         return T.f32()
     # Handle AST nodes to deal with type annotations
@@ -82,15 +98,28 @@ def to_mlir_type(x):
         )
 
 def mlir_cast(t, x):
-    if x.dtype == T.index() or t == T.index():
+    if IntegerType.isinstance(t) and x.dtype == T.index() or t == T.index() and IntegerType.isinstance(x.dtype):
         return index_cast(t, x)
+    elif FloatType.isinstance(t) and x.dtype == T.index():
+        return arith.sitofp(t, index_cast(T.i32(), x))
     else:
         if x.dtype == t:
             return x
-        elif x.dtype.width < t.width:
-            return arith.extsi(t, x)
-        else:
-            return arith.trunci(t, x)
+        elif IntegerType.isinstance(t) and IntegerType.isinstance(x.dtype):
+            if x.dtype.width < t.width:
+                return arith.extsi(t, x)
+            else:
+                return arith.trunci(t, x)
+        elif FloatType.isinstance(t) and FloatType.isinstance(x.dtype):
+            # Assume float
+            if x.dtype.width < t.width:
+                return arith.extf(t, x)
+            else:
+                return arith.truncf(t, x)
+        elif FloatType.isinstance(t) and IntegerType.isinstance(x.dtype):
+            return arith.sitofp(t, x)
+        elif IntegerType.isinstance(t) and FloatType.isinstance(x.dtype):
+            return arith.fptosi(t, x)
 
 def index_cast(t, x):
     return index.castu(t, x) if x.dtype != t else x
@@ -129,9 +158,9 @@ class SequenceOpEncoder(ast.NodeVisitor):
         return linalg.matmul
 
 def get_mlir_BinOp(op, type):
-    if type == "int" or type == "int32" or type == "int8":
+    if type == "int" or type == "int32" or type == "int16" or type == "int8":
         return IntegerOpEncoder().visit(op)
-    elif type == "float":
+    elif type == "float" or type == "bfloat16":
         return FloatOpEncoder().visit(op)
     elif type == "Sequence":
         return SequenceOpEncoder().visit(op)
@@ -178,6 +207,12 @@ class CodeGenerator(ast.NodeVisitor):
         if(name == 'int32'):
             v = self.visit(node.args[0])
             return mlir_cast(T.i32(), v)
+        if(name == 'bfloat16'):
+            v = self.visit(node.args[0])
+            return mlir_cast(T.bf16(), v)
+        if(name == 'int16'):
+            v = self.visit(node.args[0])
+            return mlir_cast(T.i16(), v)
         if(name == 'int8'):
             v = self.visit(node.args[0])
             return mlir_cast(T.i8(), v)
@@ -221,8 +256,7 @@ class CodeGenerator(ast.NodeVisitor):
         argtypes = []
         argnames = []
         for arg in node.args.args:
-            print(arg, to_mlir_type(self.get_type(arg)))
-            argtypes.append(to_mlir_type(self.get_type(arg)))#.annotation))
+            argtypes.append(to_mlir_type(self.get_type(arg)))
             argnames.append(arg.arg)
 
         # Walk the return operations and infer their types.  hopefully they are all the same.

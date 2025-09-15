@@ -57,6 +57,7 @@ from ..ir import (
     BlockList,
     DenseElementsAttr,
     DictAttr,
+    FloatType,
     FunctionType,
     InsertionPoint,
     IntegerAttr,

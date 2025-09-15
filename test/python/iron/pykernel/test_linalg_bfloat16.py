@@ -8,6 +8,7 @@
 
 import argparse
 import sys
+import ml_dtypes as np_ml
 import numpy as np
 import aie.iron as iron
 from numpy.typing import *
@@ -90,63 +91,18 @@ def test_model(fn, input0, params, output):
 
 # JIT-compile the kernel then launches the kernel with the given arguments. Future calls
 # to the kernel will use the same compiled kernel and loaded code objects
-def test_ndim(x:Sequence[int], o:Sequence[int]):
-    acc = 0
-    o[0,0] = np.ndim(x)
-    for i in range(o[0,0]):
-        o[1,i] = np.size(x, i)
-
-def test_loop1(x:Sequence[int], o:Sequence[int]):
-    acc = 0
-    for v in [2,1,0]:
-        acc = acc + 1
-        o[0,acc] = v
-
-def test_loop_int32(x:Sequence[np.int32], o:Sequence[np.int32]):
+def test_loop_bfloat16(x:Sequence[np_ml.bfloat16], o:Sequence[np_ml.bfloat16]):
     acc = 0
 
-    y = np.int32(0)
+    y = np_ml.bfloat16(0.0)
     # y = x[0,0]
     for i in range(0,8):
-        o[0,i] = x[0,i] + y + np.int32(i)
+        o[0,i] = np_ml.bfloat16(x[0,i]) + y + np_ml.bfloat16(i)
 
-def test_loop_int16(x:Sequence[np.int32], o:Sequence[np.int32]):
-    acc = 0
-
-    y = np.int16(0)
-    # y = x[0,0]
-    for i in range(0,8):
-        o[0,i] = np.int32(np.int16(x[0,i]) + y + np.int16(i))
-
-def test_loop_int8(x:Sequence[np.int32], o:Sequence[np.int32]):
-    acc = 0
-
-    y = np.int8(0)
-    # y = x[0,0]
-    for i in range(0,8):
-        o[0,i] = np.int32(np.int8(x[0,i]) + y + np.int8(i))
-
-def test_loop3(x:Sequence[int], o:Sequence[int]):
-    acc = 0
-    y = 0
-    # y = x[0,0]
-    for j in range(0,8):
-      for i in range(0,8):
-        o[j,i] = x[j,i] * x[j,i]
-
-def test_matmul(x:np.ndarray[np.int32], o:np.ndarray[np.int32]):
-    acc = 0
-    # o[0,0] = x[0,0:10] @ x[0:10,0]
-    np.matmul(x[0:8,0:8], x[0:8,0:8], out = o[0:8,0:8])
-
-def test_matmul2(x:Sequence[int], o:Sequence[int]):
-    acc = 0
-    # o[0,0] = x[0,0:10] @ x[0:10,0]
-    np.matmul(x, x, out = o)
 
 
 # from aie.iron.pykernel import get_mlir
-# print(get_mlir(test_slice2))
+# print(get_mlir(test_loop_bfloat16))
 # def test_fn3(x:Sequence[int], o:Sequence[int]):
 #     return np.ndarray((x, x), int)
 
@@ -178,8 +134,8 @@ def main():
 
     # Construct two input random tensors and an output zeroed tensor
     # The three tensor are in memory accessible to the NPU
-    input0 = iron.zeros((args.num_elements, args.num_elements), dtype=np.int32, device="npu")
-    params = iron.randint(0, 1, (16,), dtype=np.int32, device="npu")
+    input0 = iron.zeros((args.num_elements, args.num_elements), dtype=np_ml.bfloat16, device="npu")
+    params = iron.rand(16, dtype=np_ml.bfloat16)
     output = iron.zeros_like(input0)
 
     iron.set_current_device(device_map[args.device])
@@ -188,35 +144,21 @@ def main():
 
     import time
     def jit_test(test, result):
+        if args.verbose:
+            from aie.iron.pykernel import get_mlir
+            print(get_mlir(test))
         iron.jit(partial(test_model, test), is_placed=False, use_cache=True)(input0, params, output)
         if np.array_equal(output, result):
+            print("passed...")
             return
         elif str(output) != str(result):
             print(test, ": Got", str(output), "but expected", result)
 
-    golden_output = np.zeros_like(input0)
-    test_matmul(input0, golden_output)
-    jit_test(test_matmul, golden_output)
 
     golden_output = np.zeros_like(input0)
-    test_loop3(input0, golden_output)
-    jit_test(test_loop3, golden_output)
+    test_loop_bfloat16(np.array(input0), golden_output)
+    jit_test(test_loop_bfloat16, golden_output)
 
-    golden_output = np.zeros_like(input0)
-    test_ndim(input0, golden_output)
-    jit_test(test_ndim, golden_output)
-
-    golden_output = np.zeros_like(input0)
-    test_loop_int32(input0, golden_output)
-    jit_test(test_loop_int32, golden_output)
-
-    golden_output = np.zeros_like(input0)
-    test_loop_int16(input0, golden_output)
-    jit_test(test_loop_int16, golden_output)
-
-    golden_output = np.zeros_like(input0)
-    test_loop_int8(input0, golden_output)
-    jit_test(test_loop_int8, golden_output)
 
 if __name__ == "__main__":
     main()
