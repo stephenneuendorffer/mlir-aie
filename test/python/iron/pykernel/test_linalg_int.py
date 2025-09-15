@@ -59,7 +59,7 @@ def test_model(fn, input0, params, output):
     #, dims_to_stream=a_dims)
     
     # memA = of_in1.cons().forward(name="memA", dims_to_stream=a_dims)
-    test_kernel = PyKernel(fn, Pipeline().canonicalize().convert_linalg_to_affine_loops().add_pass("affine-raise-from-memref").affine_super_vectorize("8", vectorize_reductions=True))
+    test_kernel = PyKernel(fn, Pipeline().canonicalize().convert_linalg_to_affine_loops())#.add_pass("affine-raise-from-memref").affine_super_vectorize("8", vectorize_reductions=True))
 
     # Define a task that will run on a compute tile
     def core_body(of_in1, of_params, of_out, kernel):
@@ -102,13 +102,21 @@ def test_loop1(x:Sequence[int], o:Sequence[int]):
         acc = acc + 1
         o[0,acc] = v
 
-def test_loop_int(x:Sequence[np.int32], o:Sequence[np.int32]):
+def test_loop_int32(x:Sequence[np.int32], o:Sequence[np.int32]):
     acc = 0
 
     y = np.int32(0)
     # y = x[0,0]
     for i in range(0,8):
         o[0,i] = x[0,i] + y + np.int32(i)
+
+def test_loop_int8(x:Sequence[np.int32], o:Sequence[np.int32]):
+    acc = 0
+
+    y = np.int8(0)
+    # y = x[0,0]
+    for i in range(0,8):
+        o[0,i] = np.int32(np.int8(x[0,i]) + y + np.int8(i))
 
 def test_loop3(x:Sequence[int], o:Sequence[int]):
     acc = 0
@@ -118,7 +126,7 @@ def test_loop3(x:Sequence[int], o:Sequence[int]):
       for i in range(0,8):
         o[j,i] = x[j,i] * x[j,i]
 
-def test_matmul(x:Sequence[int], o:Sequence[int]):
+def test_matmul(x:np.ndarray[np.int32], o:np.ndarray[np.int32]):
     acc = 0
     # o[0,0] = x[0,0:10] @ x[0:10,0]
     np.matmul(x[0:8,0:8], x[0:8,0:8], out = o[0:8,0:8])
@@ -165,7 +173,6 @@ def main():
     input0 = iron.zeros((args.num_elements, args.num_elements), dtype=np.int32, device="npu")
     params = iron.randint(0, 1, (16,), dtype=np.int32, device="npu")
     output = iron.zeros_like(input0)
-    golden_output = np.zeros_like(input0)
 
     iron.set_current_device(device_map[args.device])
 
@@ -179,28 +186,25 @@ def main():
         elif str(output) != str(result):
             print(test, ": Got", str(output), "but expected", result)
 
+    golden_output = np.zeros_like(input0)
     test_matmul(input0, golden_output)
-    print(input0, golden_output)
+    jit_test(test_matmul, golden_output)
 
-    golden_string = """tensor([[ 36, 72,108,144,180,216,252,288],
- [ 36, 72,108,144,180,216,252,288],
- [ 36, 72,108,144,180,216,252,288],
- [ 36, 72,108,144,180,216,252,288],
- [ 36, 72,108,144,180,216,252,288],
- [ 36, 72,108,144,180,216,252,288],
- [ 36, 72,108,144,180,216,252,288],
- [ 36, 72,108,144,180,216,252,288]], device='npu')"""
-    jit_test(test_loop3, golden_string)
+    golden_output = np.zeros_like(input0)
+    test_loop3(input0, golden_output)
+    jit_test(test_loop3, golden_output)
 
-    # jit_test(test_matmul, golden_string)
-    # jit_test(test_matmul2, golden_string)
     golden_output = np.zeros_like(input0)
     test_ndim(input0, golden_output)
     jit_test(test_ndim, golden_output)
 
     golden_output = np.zeros_like(input0)
-    test_loop_int(input0, golden_output)
-    jit_test(test_loop_int, golden_output)
+    test_loop_int32(input0, golden_output)
+    jit_test(test_loop_int32, golden_output)
+
+    golden_output = np.zeros_like(input0)
+    test_loop_int8(input0, golden_output)
+    jit_test(test_loop_int8, golden_output)
 
 if __name__ == "__main__":
     main()

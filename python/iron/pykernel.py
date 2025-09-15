@@ -25,12 +25,12 @@ from .resolvable import Resolvable
 from .. import ir
 
 import ast, inspect
-import mypy.parse as mp
 
 import astroid
 import astypes
 
 from collections import defaultdict
+from collections.abc import Iterable
 import aie.extras.types as T
 
 import logging
@@ -53,6 +53,8 @@ def is_memref_type(t):
 def to_mlir_type(x):
     if x == "int" or x == "int32":
         return T.i32()
+    elif x == "int8":
+        return T.i8()
     elif x == "float":
         return T.f32()
     # Handle AST nodes to deal with type annotations
@@ -78,6 +80,17 @@ def to_mlir_type(x):
         raise AttributeError(
             f"Failed to map ast type to mlir python type: {str(x)}"
         )
+
+def mlir_cast(t, x):
+    if x.dtype == T.index() or t == T.index():
+        return index_cast(t, x)
+    else:
+        if x.dtype == t:
+            return x
+        elif x.dtype.width < t.width:
+            return arith.extsi(t, x)
+        else:
+            return arith.trunci(t, x)
 
 def index_cast(t, x):
     return index.castu(t, x) if x.dtype != t else x
@@ -116,7 +129,7 @@ class SequenceOpEncoder(ast.NodeVisitor):
         return linalg.matmul
 
 def get_mlir_BinOp(op, type):
-    if type == "int" or type == "int32":
+    if type == "int" or type == "int32" or type == "int8":
         return IntegerOpEncoder().visit(op)
     elif type == "float":
         return FloatOpEncoder().visit(op)
@@ -164,16 +177,19 @@ class CodeGenerator(ast.NodeVisitor):
         (mod, name) = self.canonicalize_function_name(node.func)
         if(name == 'int32'):
             v = self.visit(node.args[0])
-            return index_cast(T.i32(), v)
+            return mlir_cast(T.i32(), v)
+        if(name == 'int8'):
+            v = self.visit(node.args[0])
+            return mlir_cast(T.i8(), v)
         if(name == 'ndim'):
             tensor = self.visit(node.args[0])
             rank = memref.rank(tensor)
-            return index_cast(T.i32(), rank)
+            return rank #mlir_cast(T.i32(), rank)
         if(name == 'size'):
             tensor = self.visit(node.args[0])
             idx = self.visit(node.args[1])
             size = memref.dim(tensor, idx)
-            return index_cast(T.i32(), size)
+            return size #mlir_cast(T.i32(), size)
         if(name == 'ndarray'):
             args = [index_cast(T.index(), ast.NodeVisitor.visit(self, x)) for x in node.args[0].elts]
             allocaop = alloca(args, T.f32(), alignment=64)
@@ -205,7 +221,8 @@ class CodeGenerator(ast.NodeVisitor):
         argtypes = []
         argnames = []
         for arg in node.args.args:
-            argtypes.append(to_mlir_type(arg.annotation))
+            print(arg, to_mlir_type(self.get_type(arg)))
+            argtypes.append(to_mlir_type(self.get_type(arg)))#.annotation))
             argnames.append(arg.arg)
 
         # Walk the return operations and infer their types.  hopefully they are all the same.
@@ -268,18 +285,17 @@ class CodeGenerator(ast.NodeVisitor):
                 slices = self.get_slice_as_index(node.slice)
                 args = [[index_cast(T.index(), x) for x in y] for y in zip(*slices)]            
                 shape = [ir.ShapedType.get_dynamic_size() for x in slices]
-                shaped_mem_op = memref.cast(T.memref(*shape, T.i32()), mem_op)
+                shaped_mem_op = memref.cast(T.memref(*shape, mem_op.type.element_type), mem_op)
                 return memref.subview(shaped_mem_op, *args,
-                                      result_type = T.memref(*shape, T.i32(), layout=ir.StridedLayoutAttr.get(ir.ShapedType.get_dynamic_size(), shape)))
+                                      result_type = T.memref(*shape, mem_op.type.element_type, layout=ir.StridedLayoutAttr.get(ir.ShapedType.get_dynamic_size(), shape)))
             else:
                 indexes = self.visit(node.slice)
                 # print(var, indexes)
-                from collections.abc import Iterable
                 if not isinstance(indexes, Iterable):
                     indexes = [indexes]
                 args = [index_cast(T.index(), x) for x in indexes]            
                 shape = [ir.ShapedType.get_dynamic_size() for x in indexes]
-                shaped_mem_op = memref.CastOp(T.memref(*shape, T.i32()), mem_op)
+                shaped_mem_op = memref.CastOp(T.memref(*shape, mem_op.type.element_type), mem_op)
                 return memref.load(shaped_mem_op, args)
         else:
             # TODO: Del, AugStore, etc
@@ -302,9 +318,9 @@ class CodeGenerator(ast.NodeVisitor):
                     slices = self.get_slice_as_index(target.slice)
                     args = [[index_cast(T.index(), x) for x in y] for y in zip(*slices)]            
                     shape = [ir.ShapedType.get_dynamic_size() for x in slices]
-                    shaped_mem_op = memref.cast(T.memref(*shape, T.i32()), mem_op)
+                    shaped_mem_op = memref.cast(T.memref(*shape, mem_op.type.element_type), mem_op)
                     target_subview = memref.subview(shaped_mem_op, *args,
-                                        result_type = T.memref(*shape, T.i32(), layout=ir.StridedLayoutAttr.get(ir.ShapedType.get_dynamic_size(), shape)))            
+                                        result_type = T.memref(*shape, mem_op.type.element_type, layout=ir.StridedLayoutAttr.get(ir.ShapedType.get_dynamic_size(), shape)))            
                     memref.copy(value, target_subview)
                 else:
                     mem_op = self.visit(target.value)
@@ -315,8 +331,8 @@ class CodeGenerator(ast.NodeVisitor):
                         indexes = [indexes]
                     args = [index_cast(T.index(), x) for x in indexes]
                     shape = [ir.ShapedType.get_dynamic_size() for x in indexes]
-                    shaped_mem_op = memref.CastOp(T.memref(*shape, T.i32()), mem_op)
-                    memref.store(value, shaped_mem_op, args)
+                    shaped_mem_op = memref.CastOp(T.memref(*shape, mem_op.type.element_type), mem_op)
+                    memref.store(index_cast(mem_op.type.element_type, value), shaped_mem_op, args)
             else:
                 # TODO: Del, AugStore, etc
                 print("Unsupported assignment context type %s" %
@@ -352,8 +368,8 @@ class CodeGenerator(ast.NodeVisitor):
                 f"BinOp types don't match: {str(lefttype)} and {str(righttype)} in '{ast.unparse(node)}'"
             )
 
-        left = index_cast(right.dtype, left)
-        right = index_cast(left.dtype, right)
+        left = mlir_cast(right.dtype, left)
+        right = mlir_cast(left.dtype, right)
 
         if left.dtype != right.dtype:
             raise AttributeError(
