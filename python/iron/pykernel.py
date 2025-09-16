@@ -15,12 +15,30 @@ from ..dialects.aiex import *
 from ..extras.context import mlir_mod_ctx
 from ..helpers.dialects.ext.scf import *
 from ..dialects import memref, arith, func, affine, index, scf, linalg
+from ..dialects import transform
 from ..extras.dialects.ext.arith import constant
 from ..extras.dialects.ext.memref import alloca
 from ..helpers.util import np_dtype_to_mlir_type, infer_mlir_type
 from ..extras.runtime.passes import Pipeline
 from ..passmanager import PassManager
 # from ..execution_engine import ExecutionEngine
+from ..dialects.transform import interpreter as interp
+from ..dialects.transform import (
+    structured,
+    get_parent_op,
+    apply_patterns_canonicalization,
+    apply_cse,
+    any_op_t,
+    FailurePropagationMode,
+)
+from ..dialects.transform.structured import structured_match, structured_pack
+from ..dialects.transform.extras import (
+    constant_param,
+    OpHandle,
+    insert_transform_script,
+    sequence,
+    apply_patterns,
+)
 from .resolvable import Resolvable
 from .. import ir
 
@@ -539,6 +557,57 @@ class PyKernel(Resolvable):
         if not self._op:
             self._op = process_core_function(self._name)
 
+        print_root_module = """
+        module attributes {transform.with_named_sequence} {
+        transform.named_sequence @__transform_main(%root: !transform.any_op) {
+            transform.print %root { name = \"before\" }: !transform.any_op
+            transform.yield
+        }
+        }"""
+
+        m = ir.Module.parse(print_root_module)
+        with mlir_mod_ctx() as ctx:
+            @sequence([], FailurePropagationMode.Propagate, [])
+            def basic(target: any_op_t()):
+                m = structured_match(any_op_t(), target, ops=["linalg.matmul"])
+                m.print("Vectorizing...")
+                # structured_pack(any_op_t(), m, [], static_packed_sizes = [Attribute.parse(str(x)) for x in [4,4,8]])
+                #r = structured.VectorizeOp(target, [8,8])
+                # r.print("Got...")
+                # loop = get_parent_op(pdl.op_t(), m, op_name="scf.for")
+                # loop_unroll(loop, 4)
+
+            # %genop = transform.structured.pack %gemmop packed_sizes = [4, 4, 8] : (!transform.any_op) -> (!transform.op<"linalg.generic">)
+
+            # %pack = transform.get_producer_of_operand %genop[1] : (!transform.op<"linalg.generic">) -> (!transform.op<"tensor.pack">)
+            # %k, %pack_2, %empty_unpack_2 =
+            #   transform.structured.pack_transpose %pack with_compute_op(%genop)
+            #   inner_perm = [1, 0]
+            #     : (!transform.op<"tensor.pack">, !transform.op<"linalg.generic">)
+            #     -> (!transform.op<"linalg.generic">, !transform.op<"tensor.pack">, !transform.any_op)
+
+
+            # %contgenop = transform.structured.vectorize_contraction %k :(!transform.op<"linalg.generic">) -> (!transform.op<"linalg.generic">)
+                                                                                                      
+            # sequence = transform.SequenceOp(
+            #     transform.FailurePropagationMode.Propagate,
+            #     [],
+            #     transform.AnyOpType.get(),
+            # )
+            # with InsertionPoint(sequence.body):
+            #     r = sequence.bodyTarget.match_ops("linalg.matmul")
+            #     r.print("found!")
+            #     # sz1 = transform.structured.MatchOp.match_op_names(sequence.bodyTarget, ["linalg.matmul"])
+            #     # sz1.print("found!")
+            #     # func(sequence.bodyTarget)
+            #     transform.YieldOp()
+            # sz2 = Attribute.parse("4")
+            # structured.VectorizeOp(target, [sz1, sz2])        
+        m = ctx.module
+        print(m)
+        print(self._op)
+        interp.apply_named_sequence(self._op, m.body.operations[0], m)
+                
         if self._passes is not None:
             if isinstance(self._passes, Pipeline):
                 strpasses = Pipeline().Func(self._passes).materialize(module=False)
