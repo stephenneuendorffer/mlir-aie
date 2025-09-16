@@ -147,7 +147,7 @@ def main():
         if args.verbose:
             from aie.iron.pykernel import get_mlir
             print(get_mlir(test))
-        iron.jit(partial(test_model, test), is_placed=False, use_cache=True)(input0, params, output)
+        iron.jit(partial(test_model, test), is_placed=False, use_cache=False, verbose=True)(input0, params, output)
         if np.array_equal(output, result):
             print("passed...")
             return

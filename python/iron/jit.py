@@ -133,13 +133,14 @@ class NPUKernel_Error(Exception):
     pass
 
 
-def jit(function=None, is_placed=True, use_cache=True):
+def jit(function=None, is_placed=True, use_cache=True, verbose=False):
     """
     Decorator to compile an IRON kernel into a binary to run on the NPU.
 
     Parameters:
     - is_placed (bool): Whether the kernel is using explicit or implicit placement Defaults to True.
     - use_cache (bool): Use cached MLIR module if available. Defaults to True.
+    - verbose (bool): show verbose output from compilation
     """
 
     if function is None:
@@ -232,6 +233,7 @@ def jit(function=None, is_placed=True, use_cache=True):
                     insts_path=inst_path,
                     xclbin_path=xclbin_path,
                     work_dir=kernel_dir,
+                    verbose=verbose,
                 )
             except Exception as e:
                 # Clean up cache directory on any compilation failure to avoid any corrupted objects in the cache
